@@ -154,8 +154,9 @@ const specs: FnSpec[] = [
     const needle = arg(args, 1);
     if (isEmpty(hay) || isEmpty(needle)) return false;
     if (Array.isArray(hay)) return hay.some((item) => valuesEqual(item, needle));
-    // Text containment is case-sensitive.
-    return typeof hay === 'string' && typeof needle === 'string' && hay.includes(needle);
+    // Text containment is case-insensitive (Unicode-aware), matching SQL ILIKE.
+    return typeof hay === 'string' && typeof needle === 'string' &&
+      hay.toLowerCase().includes(needle.toLowerCase());
   }),
   spec('TODAY', (args, pos) => {
     arity('TODAY', args, 0, 0, pos);

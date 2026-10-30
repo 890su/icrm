@@ -179,6 +179,11 @@ describe('expression evaluator', () => {
   test('CONTAINS', () => {
     expect(ev('CONTAINS({t}, "mon")', { t: 'montage' })).toBe(true);
     expect(ev('CONTAINS({t}, "xyz")', { t: 'montage' })).toBe(false);
+    // text containment is case-insensitive, including Cyrillic; list containment stays exact
+    expect(ev('CONTAINS("Камера склад", "кам")')).toBe(true);
+    expect(ev('CONTAINS({t}, "СКЛАД")', { t: 'Камера склад' })).toBe(true);
+    expect(ev('CONTAINS({t}, "MON")', { t: 'montage' })).toBe(true);
+    expect(ev('CONTAINS({t}, "VIP")', { t: ['vip'] })).toBe(false);
     expect(ev('CONTAINS({t}, "x")', { t: ['vip'] })).toBe(false);
     expect(ev('CONTAINS({t}, "x")')).toBe(false);
     expect(ev('CONTAINS({t}, {x})', { t: 'abc' })).toBe(false);
