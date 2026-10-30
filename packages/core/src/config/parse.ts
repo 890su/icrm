@@ -7,7 +7,12 @@ import {
 
 type Path = (string | number)[];
 
-const fmt = (path: Path): string => path.join('.');
+/** Object keys use dot form, array indices bracket form: `rules[0].when`. */
+const fmt = (path: Path): string =>
+  path.reduce<string>(
+    (acc, p) => (typeof p === 'number' ? `${acc}[${p}]` : acc === '' ? p : `${acc}.${p}`),
+    '',
+  );
 
 /** Source line of `path`; falls back to the nearest ancestor that exists in the document. */
 function lineOf(doc: Document.Parsed, lc: LineCounter, path: Path): number | undefined {

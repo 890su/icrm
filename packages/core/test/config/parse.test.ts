@@ -29,7 +29,7 @@ describe('parseConfigFiles', () => {
       file('a.yaml', 'fields:\n  hours: {type: number, label: Часы}\nrules:\n  - id: r1\n    when: "1 = 1"\n'),
     ]);
     expect(raw.fields[0]?.src).toEqual({ file: 'a.yaml', path: 'fields.hours', line: 2 });
-    expect(raw.rules[0]?.src).toEqual({ file: 'a.yaml', path: 'rules.0', line: 4 });
+    expect(raw.rules[0]?.src).toEqual({ file: 'a.yaml', path: 'rules[0]', line: 4 });
   });
 
   test('applies defaults for link and rollup', () => {
@@ -85,12 +85,17 @@ describe('parseConfigFiles', () => {
       .toMatchObject([{ file: 'b.yaml', path: 'sets.s' }]);
     const rule = 'rules:\n  - {id: r, when: "1 = 1"}';
     expect(issuesOf([file('a.yaml', rule), file('b.yaml', rule)]))
-      .toMatchObject([{ file: 'b.yaml', path: 'rules.0.id', line: 2 }]);
+      .toMatchObject([{ file: 'b.yaml', path: 'rules[0].id', line: 2 }]);
   });
 
   test('schema violation reports file, path and line', () => {
     expect(issuesOf([file('a.yaml', 'fields:\n  x:\n    type: nope\n    label: X')])[0])
       .toMatchObject({ file: 'a.yaml', path: 'fields.x.type', line: 3 });
+  });
+
+  test('schema issues inside rules use bracket indices', () => {
+    expect(issuesOf([file('a.yaml', 'rules:\n  - {id: a, when: x}\n  - {id: b}\n')])[0])
+      .toMatchObject({ path: 'rules[1].when', line: 3 });
   });
 
   test('missing required property points at the definition', () => {

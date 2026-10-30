@@ -1,6 +1,6 @@
 export interface ConfigIssue {
   file: string;
-  /** Dotted path inside the file, e.g. `fields.work_cost.expr` or `rules.0.when`. */
+  /** Dotted path inside the file, e.g. `fields.work_cost.expr` or `rules[0].when`. */
   path: string;
   line?: number;
   message: string;
