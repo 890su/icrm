@@ -5,10 +5,13 @@ import {
 import type { Kysely, Transaction } from 'kysely';
 import { uuidv7 } from 'uuidv7';
 import { appendChangeLog, type ChangeEntry } from '../repo/change-log.js';
-import { linksFrom } from '../repo/links.js';
+import { ancestorsVia, linksFrom, replaceLinks } from '../repo/links.js';
 import { insertRecord, loadRecords, writeRecord, writeSets, type StoredRecord } from '../repo/records.js';
 import type { Db } from '../repo/types.js';
 import type { DB } from '../schema.js';
+import {
+  archiveSeeds, changedSetKeys, refreshOwnRollups, runCascade, type CascadeSeed,
+} from './cascade.js';
 import { archived, notFound, recordError, SaveFailed, versionConflict } from './errors.js';
 
 export interface RecordView {
@@ -34,7 +37,23 @@ export interface CreateInput {
   title: string;
   data?: Record<string, Value>;
   sets?: string[];
+  /** Targets per link field, checked like `setLinks` against the sets given in `sets`. */
+  links?: Record<string, string[]>;
 }
+
+export interface SetLinksInput {
+  id: string;
+  userId: string;
+  field: string;
+  targetIds: string[];
+}
+
+export interface ArchiveInput {
+  id: string;
+  userId: string;
+}
+
+type LinkChange = CascadeSeed['changedLinks'][number];
 
 export interface UpdateInput {
   id: string;
@@ -96,16 +115,33 @@ export class RecordService {
       const input = this.knownInput({ ...i.data, title: i.title }, null, errors);
       if (errors.length > 0) throw new SaveFailed(errors);
 
+      // The row goes in first (version 0) so that links can point from it; the evaluated state
+      // is written over it below, which makes it version 1.
+      await insertRecord(tx, {
+        id, workspaceId: this.workspaceId, title: i.title, data: input, sets, createdBy: i.userId, version: 0,
+      });
+      const linkInput = Object.entries(i.links ?? {});
+      for (const [field, targetIds] of linkInput) errors.push(...await this.linkErrors(tx, id, sets, field, targetIds));
+      if (errors.length > 0) throw new SaveFailed(errors);
+      const changedLinks: LinkChange[] = [];
+      for (const [field, targetIds] of linkInput) {
+        const change = await this.replaceLinksLogged(tx, id, i.userId, field, targetIds);
+        if (change !== null) changedLinks.push(change);
+      }
+
       const userChangedKeys = new Set(Object.keys(input));
-      const next: RecordState = { data: input, sets };
+      const next: RecordState = { data: input, sets: new Map(sets) };
       const res = await this.evaluate(tx, id, null, next, userChangedKeys);
 
-      await insertRecord(tx, {
-        id, workspaceId: this.workspaceId, title: titleOf(res.state), data: res.state.data, sets: res.state.sets,
-        createdBy: i.userId,
-      });
+      const inserted = (await loadRecords(tx, [id])).get(id)!;
+      if (!(await writeRecord(tx, { ...inserted, title: titleOf(res.state), data: res.state.data }, 0))) {
+        throw new Error(`record ${id} changed inside its own create`);
+      }
+      await writeSets(tx, id, sets, res.state.sets);
       await appendChangeLog(tx, this.changeEntries(id, i.userId, null, res, userChangedKeys));
-      await this.runCascade(tx, id, res.changedKeys);
+      await this.cascade(tx, [{
+        recordId: id, changedKeys: res.changedKeys, changedSets: new Set(res.state.sets.keys()), changedLinks,
+      }]);
       return this.reload(tx, id);
     });
   }
@@ -136,9 +172,121 @@ export class RecordService {
       if (!written) throw new SaveFailed([versionConflict(i.id)]);
       await writeSets(tx, i.id, stored.sets, res.state.sets);
       await appendChangeLog(tx, this.changeEntries(i.id, i.userId, prev, res, userChangedKeys));
-      await this.runCascade(tx, i.id, res.changedKeys);
+      await this.cascade(tx, [{
+        recordId: i.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
+        changedLinks: [],
+      }]);
       return this.reload(tx, i.id);
     });
+  }
+
+  /**
+   * Replaces the targets of link field `field` (spec §1.5 checks), logs the change, refreshes the record's
+   * own rollups, re-evaluates and writes it (version bump), then cascades to the old and new targets.
+   * Setting the targets the record already has is a no-op.
+   */
+  setLinks(i: SetLinksInput): Promise<SaveResult> {
+    return this.inTransaction(async (tx) => {
+      const stored = await this.lockEditable(tx, i.id);
+      const errors = await this.linkErrors(tx, i.id, stored.sets, i.field, i.targetIds);
+      if (errors.length > 0) throw new SaveFailed(errors);
+      const change = await this.replaceLinksLogged(tx, i.id, i.userId, i.field, i.targetIds);
+      if (change === null) return this.view(tx, stored);
+
+      const prev = stateOf(stored);
+      const next: RecordState = { data: { ...prev.data }, sets: new Map(prev.sets) };
+      const userChangedKeys = new Set<string>();
+      const res = await this.evaluate(tx, i.id, prev, next, userChangedKeys);
+      const written = await writeRecord(tx, { ...stored, title: titleOf(res.state), data: res.state.data }, stored.version);
+      if (!written) throw new SaveFailed([versionConflict(i.id)]);
+      await writeSets(tx, i.id, stored.sets, res.state.sets);
+      await appendChangeLog(tx, this.changeEntries(i.id, i.userId, prev, res, userChangedKeys));
+      await this.cascade(tx, [{
+        recordId: i.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
+        changedLinks: [change],
+      }]);
+      return this.reload(tx, i.id);
+    });
+  }
+
+  /**
+   * Archives the record (version bump, `archive` log entry) and cascades to every rollup over a link
+   * touching it, in both directions: archived records drop out of rollups.
+   */
+  archive(i: ArchiveInput): Promise<SaveResult> {
+    return this.inTransaction(async (tx) => {
+      const stored = await this.lockEditable(tx, i.id);
+      const archivedAt = this.now();
+      if (!(await writeRecord(tx, { ...stored, archivedAt }, stored.version))) {
+        throw new SaveFailed([versionConflict(i.id)]);
+      }
+      await appendChangeLog(tx, [{
+        workspaceId: this.workspaceId, recordId: i.id, userId: i.userId, kind: 'archive', fieldKey: null,
+        old: null, new: archivedAt.toISOString(), source: 'user',
+      }]);
+      await this.cascade(tx, await archiveSeeds(tx, this.cfg, i.id));
+      return this.reload(tx, i.id);
+    });
+  }
+
+  /** Locks the record for a save: it must exist in this workspace and not be archived. */
+  private async lockEditable(tx: Db, id: string): Promise<StoredRecord> {
+    const stored = (await loadRecords(tx, [id], { forUpdate: true })).get(id);
+    if (stored === undefined || stored.workspaceId !== this.workspaceId) throw new SaveFailed([notFound(id)]);
+    if (stored.archivedAt !== null) throw new SaveFailed([archived(id)]);
+    return stored;
+  }
+
+  /**
+   * Spec §1.5 checks for setting `targetIds` on link field `field` of record `id` with enabled `sets`:
+   * the field is a link of an enabled set (`unknown_field`), `cardinality: one` allows one target
+   * (`link_cardinality`), each target exists in this workspace, is not archived and has one of
+   * `target_sets` (`link_target`), and a hierarchical link must not close a cycle (`link_cycle`).
+   */
+  private async linkErrors(
+    tx: Db, id: string, sets: Map<string, string>, field: string, targetIds: string[],
+  ): Promise<RecordError[]> {
+    const def = this.cfg.fields.get(field);
+    const inEnabledSet = [...(this.cfg.setsOfField.get(field) ?? [])].some((s) => sets.has(s));
+    if (def?.type !== 'link' || !inEnabledSet) {
+      return [recordError('unknown_field', `Поле "${field}" не является связью включённых наборов записи`, { field })];
+    }
+    const targets = [...new Set(targetIds)];
+    const errors: RecordError[] = [];
+    if (def.cardinality === 'one' && targets.length > 1) {
+      errors.push(recordError('link_cardinality', `Поле «${def.label}» допускает только одну связь`, { field }));
+    }
+    const wanted = def.target_sets ?? [];
+    const loaded = await loadRecords(tx, targets);
+    for (const target of targets) {
+      const t = loaded.get(target);
+      if (t === undefined || t.workspaceId !== this.workspaceId) {
+        errors.push(recordError('link_target', `Поле «${def.label}»: запись ${target} не найдена`, { field }));
+      } else if (t.archivedAt !== null) {
+        errors.push(recordError('link_target', `Поле «${def.label}»: запись ${target} в архиве`, { field }));
+      } else if (!wanted.some((s) => t.sets.has(s))) {
+        const names = wanted.map((s) => `«${this.setLabel(s)}»`).join(', ');
+        errors.push(recordError('link_target', `Поле «${def.label}»: у записи ${target} нет набора ${names}`, { field }));
+      } else if (def.hierarchical === true && (target === id || (await ancestorsVia(tx, target, field)).includes(id))) {
+        errors.push(recordError('link_cycle', `Поле «${def.label}»: связь с ${target} образует цикл`, { field }));
+      }
+    }
+    return errors;
+  }
+
+  /** Replaces the targets and logs a `link` entry; null when the targets (and their order) did not change. */
+  private async replaceLinksLogged(
+    tx: Db, id: string, userId: string, field: string, targetIds: string[],
+  ): Promise<LinkChange | null> {
+    const before = await linksFrom(tx, id, field);
+    const after = [...new Set(targetIds)];
+    if (before.length === after.length && before.every((t, n) => t === after[n])) return null;
+    await replaceLinks(tx, this.workspaceId, id, field, after);
+    await appendChangeLog(tx, [{
+      workspaceId: this.workspaceId, recordId: id, userId, kind: 'link', fieldKey: field,
+      old: before, new: after, source: 'user',
+    }]);
+    return { field, otherIds: [...new Set([...before, ...after])] };
   }
 
   private async inTransaction(work: (tx: Transaction<DB>) => Promise<RecordView>): Promise<SaveResult> {
@@ -150,24 +298,24 @@ export class RecordService {
     }
   }
 
-  /** Refreshes own rollups, runs the engine and fails the save on any error. */
+  /**
+   * Recomputes the record's own rollups into `next.data` (so formulas and rules see current totals),
+   * runs the engine and fails the save on any error.
+   */
   private async evaluate(
     tx: Db, id: string, prev: RecordState | null, next: RecordState, userChangedKeys: Set<string>,
   ): Promise<EvalResult> {
-    await this.refreshOwnRollups(tx, id, next);
+    await refreshOwnRollups(tx, this.cfg, { id, data: next.data, sets: next.sets }, this.now());
     const res = evaluateRecord(this.cfg, prev, next, { now: this.now(), userChangedKeys });
     if (res.errors.length > 0) throw new SaveFailed(res.errors);
     return res;
   }
 
-  /**
-   * Task 11 seam: recompute this record's own rollup values into `next.data` before `evaluateRecord`,
-   * so formulas and rules see current totals. No-op until rollups are wired in.
-   */
-  private async refreshOwnRollups(_tx: Db, _id: string, _next: RecordState): Promise<void> {}
-
-  /** Task 11 seam: after this record is written, propagate `changedKeys` to the rollups of linked records. No-op for now. */
-  private async runCascade(_tx: Db, _id: string, _changedKeys: Set<string>): Promise<void> {}
+  /** After the originating record is written: propagates its changes to the rollups of linked records. */
+  private async cascade(tx: Db, seeds: CascadeSeed[]): Promise<void> {
+    const errors = await runCascade(tx, this.cfg, seeds, this.now(), this.workspaceId);
+    if (errors.length > 0) throw new SaveFailed(errors);
+  }
 
   /**
    * Normalises the input (`""`/whitespace → `null` for non-text fields) and drops keys the config does not

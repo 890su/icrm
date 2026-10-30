@@ -1,0 +1,62 @@
+# Links, rollups and the cascade (Task 11): conversation totals over its tasks, a recursive task tree.
+fields:
+  hours: {type: number, label: Часы}
+  rate: {type: number, label: Ставка}
+  labor_cost: {type: formula, label: Стоимость работ, expr: '{hours} * {rate}'}
+  done: {type: bool, label: Выполнена}
+  conversation:
+    type: link
+    label: Разговор
+    target_sets: [conversation]
+    cardinality: one
+    inverse_label: Задачи
+  conversation_title: {type: rollup, label: Тема разговора, via: conversation, field: title, agg: first}
+  tasks_cost_total:
+    type: rollup
+    label: Сумма по задачам
+    via: conversation
+    direction: inverse
+    field: labor_cost
+    agg: sum
+  open_tasks_count:
+    type: rollup
+    label: Открытых задач
+    via: conversation
+    direction: inverse
+    agg: count
+    filter: 'NOT({done})'
+  work_note: {type: text, label: Заметка по работам}
+  cost_cap: {type: number, label: Лимит стоимости}
+  parent_task:
+    type: link
+    label: Родительская задача
+    target_sets: [task]
+    cardinality: one
+    hierarchical: true
+    inverse_label: Подзадачи
+  own_hours: {type: number, label: Свои часы}
+  children_total:
+    type: rollup
+    label: Часы подзадач
+    via: parent_task
+    direction: inverse
+    field: total_hours
+    agg: sum
+  total_hours: {type: formula, label: Часы всего, expr: '{own_hours} + COALESCE({children_total}, 0)'}
+  watchers: {type: link, label: Наблюдатели, target_sets: [contact]}
+sets:
+  conversation: {label: Разговор, fields: [title, tasks_cost_total, open_tasks_count, cost_cap]}
+  has_work: {label: Есть работа, activation: rule, fields: [work_note]}
+  task:
+    label: Задача
+    fields: [title, hours, rate, labor_cost, done, conversation, conversation_title,
+             parent_task, own_hours, children_total, total_hours]
+  contact: {label: Контакт, fields: [title, watchers]}
+rules:
+  - id: has_work_when_open
+    when: '{open_tasks_count} > 0'
+    enable_set: has_work
+  - id: cost_within_cap
+    when: 'HAS_SET("conversation") AND NOT(IS_EMPTY({cost_cap}))'
+    validate: '{tasks_cost_total} <= {cost_cap}'
+    message: Сумма по задачам превышает лимит

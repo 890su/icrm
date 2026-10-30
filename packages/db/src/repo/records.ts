@@ -65,6 +65,8 @@ export async function insertRecord(
     data: Record<string, Value>;
     sets: Map<string, string>;
     createdBy: string | null;
+    /** Defaults to 1. A save that inserts first and writes the evaluated state later inserts 0. */
+    version?: number;
   },
 ): Promise<void> {
   await tx
@@ -75,6 +77,7 @@ export async function insertRecord(
       title: r.title,
       data: JSON.stringify(r.data),
       created_by: r.createdBy,
+      version: r.version,
     })
     .execute();
   await writeSets(tx, r.id, new Map(), r.sets);
