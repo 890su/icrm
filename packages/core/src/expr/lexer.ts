@@ -17,6 +17,8 @@ const DIGIT = /[0-9]/;
 export function tokenize(src: string): Token[] {
   const out: Token[] = [];
   let i = 0;
+  // One entry per open '(': true when it opens a function-call argument list.
+  const parens: boolean[] = [];
 
   while (i < src.length) {
     const c = src[i]!;
@@ -27,7 +29,9 @@ export function tokenize(src: string): Token[] {
 
     if (DIGIT.test(c)) {
       while (i < src.length && DIGIT.test(src[i]!)) i++;
-      if (src[i] === ',' && DIGIT.test(src[i + 1] ?? '')) {
+      // Inside a call's argument list ',' is always a separator: MAX(1,2).
+      const inCallArgs = parens[parens.length - 1] === true;
+      if (!inCallArgs && src[i] === ',' && DIGIT.test(src[i + 1] ?? '')) {
         throw new ExprSyntaxError(
           'используйте точку как десятичный разделитель (1.5, а не 1,5)',
           { start: i, end: i + 1 },
@@ -88,6 +92,8 @@ export function tokenize(src: string): Token[] {
 
     if ('+-*/&=<>(),;'.includes(c)) {
       i++;
+      if (c === '(') parens.push(out[out.length - 1]?.t === 'ident');
+      else if (c === ')') parens.pop();
       out.push({ t: 'op', v: c === ';' ? ',' : c, start, end: i });
       continue;
     }

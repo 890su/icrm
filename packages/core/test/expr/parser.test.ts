@@ -75,6 +75,16 @@ describe('expression parser', () => {
     for (const src of ['', '1 +', '(1', '1 2', 'foo', 'IF(1,)', '"abc', '{a', '{}', '1 # 2']) {
       expect(() => parse(src), src).toThrow(ExprSyntaxError);
     }
+    expect(() => parse('1,5')).toThrow(ExprSyntaxError);
     try { parse('1,5'); } catch (e) { expect((e as ExprSyntaxError).pos).toEqual({ start: 1, end: 2 }); }
+  });
+
+  test('digit-comma-digit is an argument separator inside a call, a decimal-comma error outside', () => {
+    expect(parse('MAX(1,2)')).toMatchObject({ k: 'call', fn: 'MAX', args: [{ v: 1 }, { v: 2 }] });
+    expect(parse('ROUND({x},2)')).toMatchObject({ k: 'call', fn: 'ROUND', args: [{ k: 'field' }, { v: 2 }] });
+    expect(parse('IF({a},1,2)')).toMatchObject({ k: 'call', fn: 'IF', args: [{}, { v: 1 }, { v: 2 }] });
+    expect(() => parse('MAX(1,2) + 1,5')).toThrow(/десятичн/);
+    expect(() => parse('(1,5) + 1')).toThrow(ExprSyntaxError);
+    expect(() => parse('1,5 + 1')).toThrow(/десятичн/);
   });
 });
