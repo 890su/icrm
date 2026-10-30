@@ -1,0 +1,16 @@
+{
+  "name": "icrm",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -b"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
