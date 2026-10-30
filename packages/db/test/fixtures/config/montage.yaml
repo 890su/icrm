@@ -1,0 +1,29 @@
+# Mirrors packages/core/test/fixtures/montage.yaml (sets, montage rules), trimmed to what RecordService tests use.
+fields:
+  kind: {type: enum, label: Вид работ, options: [visit, montage]}
+  done: {type: bool, label: Выполнена}
+  start: {type: date, label: Начало}
+  warranty_months: {type: number, label: 'Гарантия, мес.'}
+  act_file: {type: file, label: Акт}
+  work_cost: {type: number, label: Стоимость работ}
+  notes: {type: text, label: Заметки}
+  related: {type: link, label: Связанные задачи, target_sets: [task]}
+sets:
+  task: {label: Задача, fields: [title, kind, done, start]}
+  montage:
+    label: Монтаж
+    activation: rule
+    requires: [task]
+    fields: [warranty_months, act_file, work_cost]
+  contact: {label: Контакт, fields: [notes, related]}
+rules:
+  - id: montage_by_kind
+    when: '{kind} = "montage"'
+    enable_set: montage
+  - id: act_required_on_done
+    when: '{done} AND HAS_SET("montage")'
+    require: [act_file]
+    readonly: [work_cost]
+  - id: warranty_default
+    when: 'HAS_SET("montage")'
+    default: {warranty_months: '12'}

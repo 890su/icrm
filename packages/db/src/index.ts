@@ -8,3 +8,6 @@ export {
 } from './repo/records.js';
 export { ancestorsVia, linksFrom, linksTo, replaceLinks } from './repo/links.js';
 export { appendChangeLog, type ChangeEntry } from './repo/change-log.js';
+export {
+  RecordService, type CreateInput, type RecordView, type SaveResult, type UpdateInput,
+} from './service/record-service.js';
