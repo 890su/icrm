@@ -1,0 +1,32 @@
+exclude_dirs:
+  - .git
+  - .library
+  - .chroma
+  - .claude
+  - .tmp
+  - .cache
+  - .venv
+  - venv
+  - __pycache__
+  - node_modules
+  - vendor
+  - dist
+  - build
+  - .next
+  - coverage
+  - .ssh
+  - old
+  - archive
+
+exclude_files:
+  - .env
+  - .env.local
+  - .env.production
+  - package-lock.json
+  - yarn.lock
+  - pnpm-lock.yaml
+
+exclude_patterns:
+  - .tmp_
+  - "*.pyc"
+  - "*.pyo"

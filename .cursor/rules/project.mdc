@@ -1,0 +1,16 @@
+---
+alwaysApply: true
+---
+
+@CONTEXT.md
+@PLAN.md
+
+Project rules:
+- `CONTEXT.md` is the canonical AI entrypoint.
+- `PLAN.md` is the active task state.
+- Keep work scoped to files referenced by `CONTEXT.md` unless the task requires more.
+- Update `PLAN.md` after completed work.
+- Durable decisions go to `decisions.md`.
+- Respect `.aiignore` and `.rai.yaml`.
+- Never read `.library/`, `.chroma/`, `.git/`, `.tmp/`, generated builds, or
+  secret files unless explicitly instructed and safe.
