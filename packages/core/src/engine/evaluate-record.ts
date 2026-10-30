@@ -123,16 +123,16 @@ function applySetRules(cfg: CompiledConfig, sets: Map<string, string>, active: C
 }
 
 /**
- * Spec §2.3: a default is set only into an empty field and only when its rule fires, i.e. for rules
- * active now that were not active in `prev` (every rule counts as newly active on create). A field the
- * user clears while its rule stays active therefore stays empty. First rule wins. Mutates `s.data`.
+ * Spec §2.3: a default is set only into an empty field and only when its rule fires, i.e. for active
+ * rules in `fired` (see `evaluateRecord`). A field the user clears while its rule stays active
+ * therefore stays empty. First rule wins. Mutates `s.data`.
  */
 function applyDefaults(
-  cfg: CompiledConfig, s: RecordState, active: CompiledRule[], activeInPrev: Set<string>, now: Date,
+  cfg: CompiledConfig, s: RecordState, active: CompiledRule[], fired: Set<string>, now: Date,
 ): void {
   const ctx = ctxOf(cfg, s, now);
   for (const r of active) {
-    if (activeInPrev.has(r.id)) continue;
+    if (!fired.has(r.id)) continue;
     for (const [key, ast] of Object.entries(r.defaultAsts)) {
       if (!isEmpty(get(s.data, key))) continue;
       const v = evaluate(ast, ctx);
@@ -258,7 +258,8 @@ function ruleErrors(
   }
   const ctx = ctxOf(cfg, s, now);
   for (const r of active) {
-    if (r.validateAst === undefined || evaluate(r.validateAst, ctx) === true) continue;
+    // Spec §2.3 "ложь → ошибка": only FALSE fails; null (empty or a runtime error) never fails a save.
+    if (r.validateAst === undefined || evaluate(r.validateAst, ctx) !== false) continue;
     errors.push({ rule_id: r.id, code: 'validation', message: r.message ?? `Не выполнена проверка правила "${r.id}"` });
   }
   return errors;
@@ -275,18 +276,24 @@ export function evaluateRecord(
   const { now, userChangedKeys } = opts;
   const s: RecordState = { data: { ...next.data }, sets: new Map(next.sets) };
   const history: Set<string>[] = [];
+  // A rule "fires" when it was inactive in `prev` (every rule on create) or in an earlier pass of this
+  // fixpoint; once fired it stays fired for this save. Only fired rules apply their defaults.
   const activeInPrev = new Set(prev === null ? [] : activeRulesOf(cfg, prev, now).map((r) => r.id));
+  const fired = new Set(cfg.rules.filter((r) => !activeInPrev.has(r.id)).map((r) => r.id));
   let stable = false;
 
   for (let pass = 0; pass < MAX_PASSES && !stable; pass++) {
     const before: RecordState = { data: { ...s.data }, sets: s.sets };
     computeFormulas(cfg, s, now);
     const active = activeRulesOf(cfg, s, now);
-    history.push(new Set(active.map((r) => r.id)));
+    const activeIds = new Set(active.map((r) => r.id));
+    history.push(activeIds);
     s.sets = applySetRules(cfg, s.sets, active);
-    applyDefaults(cfg, s, active, activeInPrev, now);
+    applyDefaults(cfg, s, active, fired, now);
+    for (const r of cfg.rules) if (!activeIds.has(r.id)) fired.add(r.id);
     const keys = new Set([...Object.keys(before.data), ...Object.keys(s.data)]);
-    stable = sameSets(before.sets, s.sets) && [...keys].every((k) => sameValue(before.data[k], s.data[k]));
+    stable = sameSets(before.sets, s.sets)
+      && [...keys].every((k) => sameValue(get(before.data, k), get(s.data, k)));
   }
 
   const active = activeRulesOf(cfg, s, now);

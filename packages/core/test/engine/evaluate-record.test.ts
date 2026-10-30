@@ -189,7 +189,7 @@ describe('evaluateRecord: errors', () => {
       .toEqual(['cash', 'transfer', 'card']);
   });
 
-  test('required skips hidden fields; validate fails unless TRUE', () => {
+  test('required skips hidden fields; validate fails on FALSE (comparison with empty is FALSE)', () => {
     const c = compile(`fields:
   a: {type: text, label: A}
   n: {type: number, label: N}
@@ -204,6 +204,41 @@ rules:
     expect(ev({ n: 2 }).errors).toEqual([expect.objectContaining({ code: 'required', field: 'a', rule_id: 'need_a' })]);
     expect(ev({ a: 'x' }).errors).toEqual([expect.objectContaining({ code: 'validation', rule_id: 'n_positive' })]);
   });
+});
+
+test('validate that evaluates to null passes; FALSE fails', () => {
+  const c = compile(`fields:
+  agreed: {type: bool, label: Согласовано}
+sets:
+  s: {label: S, fields: [agreed]}
+rules:
+  - {id: must_agree, when: 'TRUE', validate: '{agreed}', message: Нужно согласование}`);
+  const ev = (data: Data) => evaluateRecord(c, null, plain(data, { s: 'manual' }), { now, userChangedKeys: new Set() });
+  expect(ev({}).errors).toEqual([]);
+  expect(ev({ agreed: false }).errors)
+    .toEqual([expect.objectContaining({ code: 'validation', rule_id: 'must_agree', message: 'Нужно согласование' })]);
+});
+
+test('rule active in prev that drops out for a pass and comes back applies its default', () => {
+  const c = compile(`fields:
+  k: {type: number, label: K}
+  f: {type: number, label: F}
+sets:
+  base: {label: Base, fields: [k, f]}
+  x: {label: X, activation: rule, fields: []}
+rules:
+  - {id: e, when: '{k} = 1', enable_set: x}
+  - {id: d, when: 'HAS_SET("x")', default: {f: '5'}}`);
+  const opts = { now, userChangedKeys: new Set(['f']) };
+  const prev = evaluateRecord(c, null, plain({ k: 1 }, { base: 'manual' }), opts).state;
+  expect(prev.data.f).toBe(5);
+  // Cleared while d stays active: stays empty.
+  expect(evaluateRecord(c, prev, withData(prev, { f: null }), opts).state.data.f).toBeNull();
+  // Next state without x: d is inactive in pass 1, e re-enables x, d is active again in pass 2 → fires.
+  const next: RecordState = { data: { ...prev.data, f: null }, sets: new Map([['base', 'manual']]) };
+  const r = evaluateRecord(c, prev, next, opts);
+  expect(r.state.sets.get('x')).toBe('rule:e');
+  expect(r.state.data.f).toBe(5);
 });
 
 describe('fieldStatesOf', () => {
