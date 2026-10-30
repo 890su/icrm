@@ -1,0 +1,4 @@
+sets:
+  a: {label: A, fields: []}
+  b: {label: B, fields: [], requires: [a]}
+  c: {label: C, fields: [], requires: [b]}

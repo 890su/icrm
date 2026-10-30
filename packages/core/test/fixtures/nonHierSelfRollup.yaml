@@ -1,0 +1,13 @@
+fields:
+  parent_task: {type: link, label: Родитель, target_sets: [task], cardinality: one}
+  own: {type: number, label: Свои часы}
+  total: {type: formula, label: Итого, expr: '{own} + {children_total}'}
+  children_total:
+    type: rollup
+    label: Часы подзадач
+    via: parent_task
+    direction: inverse
+    field: total
+    agg: sum
+sets:
+  task: {label: Задача, fields: [parent_task, own, total, children_total]}

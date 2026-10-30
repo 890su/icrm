@@ -1,0 +1,14 @@
+fields:
+  cost: {type: money, label: Стоимость}
+  name: {type: text, label: Имя}
+  addr: {type: text, label: Адрес}
+  items: {type: link, label: Позиции, target_sets: [item], cardinality: many}
+  org: {type: link, label: Организация, target_sets: [org], cardinality: one}
+  sum_cost: {type: rollup, label: Сумма, via: items, field: cost, agg: sum}
+  n: {type: rollup, label: Количество, via: items, agg: count}
+  names: {type: rollup, label: Имена, via: items, field: name, agg: list}
+  org_addr: {type: rollup, label: Адрес организации, via: org, field: addr, agg: first}
+sets:
+  item: {label: Позиция, fields: [cost, name]}
+  org: {label: Организация, fields: [addr]}
+  doc: {label: Документ, fields: [items, org, sum_cost, n, names, org_addr]}

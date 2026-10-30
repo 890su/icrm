@@ -1,0 +1,6 @@
+fields:
+  hours: {type: number, label: Часы}
+rules:
+  - id: r
+    when: '{hours} > 0'
+    default: {hours: '"abc"'}

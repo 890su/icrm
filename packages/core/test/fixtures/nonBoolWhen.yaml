@@ -1,0 +1,4 @@
+fields:
+  hours: {type: number, label: Часы}
+rules:
+  - {id: r, when: '{hours} + 1', hide: [hours]}
