@@ -21,3 +21,5 @@ export { evaluateRecord, fieldStatesOf } from './engine/evaluate-record.js';
 export type {
   ErrorCode, EvalOptions, EvalResult, FieldState, RecordError, RecordState,
 } from './engine/evaluate-record.js';
+export { computeRollup, type RelatedRecord } from './engine/aggregate.js';
+export { rollupsFedBy, rollupsVia } from './engine/cascade-plan.js';

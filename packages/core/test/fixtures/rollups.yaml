@@ -1,0 +1,29 @@
+fields:
+  hours: {type: number, label: Часы}
+  cost: {type: money, label: Стоимость}
+  done: {type: bool, label: Выполнена}
+  done_at: {type: datetime, label: Выполнена в}
+  name: {type: text, label: Имя}
+  addr: {type: text, label: Адрес}
+  unrelated: {type: text, label: Не связано}
+  tasks: {type: link, label: Задачи, target_sets: [task], cardinality: many}
+  org: {type: link, label: Организация, target_sets: [org], cardinality: one}
+  sum_hours: {type: rollup, label: Часы всего, via: tasks, field: hours, agg: sum}
+  sum_cost: {type: rollup, label: Стоимость всего, via: tasks, field: cost, agg: sum}
+  avg_hours: {type: rollup, label: Средние часы, via: tasks, field: hours, agg: avg}
+  avg_cost: {type: rollup, label: Средняя стоимость, via: tasks, field: cost, agg: avg}
+  min_hours: {type: rollup, label: Минимум часов, via: tasks, field: hours, agg: min}
+  open_count: {type: rollup, label: Открытых, via: tasks, agg: count, filter: 'NOT({done})'}
+  all_done: {type: rollup, label: Все выполнены, via: tasks, field: done, agg: all}
+  any_done: {type: rollup, label: Есть выполненные, via: tasks, field: done, agg: any}
+  names: {type: rollup, label: Имена, via: tasks, field: name, agg: list}
+  max_done_at: {type: rollup, label: Последняя дата, via: tasks, field: done_at, agg: max}
+  urgent_hours: {type: rollup, label: Срочные часы, via: tasks, field: hours, agg: sum, filter: 'HAS_SET("urgent")'}
+  org_addr: {type: rollup, label: Адрес организации, via: org, field: addr, agg: first}
+sets:
+  task: {label: Задача, fields: [title, hours, cost, done, done_at, name, unrelated]}
+  urgent: {label: Срочная, fields: []}
+  org: {label: Организация, fields: [addr]}
+  conv:
+    label: Разговор
+    fields: [tasks, org, sum_hours, sum_cost, avg_hours, avg_cost, min_hours, open_count, all_done, any_done, names, max_done_at, urgent_hours, org_addr]
