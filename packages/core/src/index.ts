@@ -12,6 +12,7 @@ export type {
   Agg, FieldDef, FieldType, RawConfig, RuleDef, SetDef, SourceRef,
 } from './config/schema.js';
 export { parseConfigFiles } from './config/parse.js';
+export { KEY_RE } from './config/schema.js';
 export { compileConfig } from './config/compile.js';
 export type {
   CompiledConfig, CompiledField, CompiledRollup, CompiledRule, CompiledSet,

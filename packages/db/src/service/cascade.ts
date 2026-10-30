@@ -165,19 +165,21 @@ async function affectedBy(tx: Db, cfg: CompiledConfig, seeds: CascadeSeed[]): Pr
 }
 
 /**
- * Re-evaluates a locked record after its rollups may have changed and writes it if anything changed.
- * Its own errors (required, validate, oscillation) are ignored: the record did not cause this save,
- * so its computed state is stored anyway. Returns what changed, or null.
+ * Re-evaluates a locked record after its rollups (or the definition of a computed field) may have changed
+ * and writes it if anything changed, logging with `source`. Its own errors (required, validate,
+ * oscillation) do not stop the write: the record did not cause this recomputation, so its computed state
+ * is stored anyway; they are returned for the caller to report or ignore. `seed` is what changed, or null.
  */
-async function recompute(
+export async function recompute(
   tx: Db, cfg: CompiledConfig, rec: StoredRecord, now: Date, workspaceId: string, userId: string | null,
-): Promise<CascadeSeed | null> {
+  source: 'cascade' | 'system' = 'cascade',
+): Promise<{ seed: CascadeSeed | null; errors: RecordError[] }> {
   const prev: RecordState = { data: { ...rec.data, title: rec.title }, sets: new Map(rec.sets) };
   const res = await evaluateWithRollups(tx, cfg, rec.id, prev, prev, { now, userChangedKeys: new Set() });
 
   const changedSets = changedSetKeys(prev.sets, res.state.sets);
   const relabelled = [...res.state.sets].some(([k, by]) => prev.sets.has(k) && prev.sets.get(k) !== by);
-  if (res.changedKeys.size === 0 && changedSets.size === 0 && !relabelled) return null;
+  if (res.changedKeys.size === 0 && changedSets.size === 0 && !relabelled) return { seed: null, errors: res.errors };
 
   const title = typeof res.state.data.title === 'string' ? res.state.data.title : '';
   if (!(await writeRecord(tx, { ...rec, title, data: res.state.data }, rec.version))) {
@@ -185,7 +187,7 @@ async function recompute(
   }
   await writeSets(tx, rec.id, rec.sets, res.state.sets);
 
-  const base = { workspaceId, recordId: rec.id, userId, source: 'cascade' as const };
+  const base = { workspaceId, recordId: rec.id, userId, source };
   const entries = [...res.changedKeys].map((key): ChangeEntry => ({
     ...base, kind: 'value', fieldKey: key, old: prev.data[key] ?? null, new: res.state.data[key] ?? null,
   }));
@@ -194,7 +196,8 @@ async function recompute(
     if (was !== is) entries.push({ ...base, kind: 'set', fieldKey: key, old: was ?? null, new: is ?? null });
   }
   await appendChangeLog(tx, entries);
-  return { recordId: rec.id, changedKeys: res.changedKeys, changedSets, changedLinks: [] };
+  const seed: CascadeSeed = { recordId: rec.id, changedKeys: res.changedKeys, changedSets, changedLinks: [] };
+  return { seed, errors: res.errors };
 }
 
 /**
@@ -224,7 +227,7 @@ export async function runCascade(
       if (rec.workspaceId !== workspaceId || rec.archivedAt !== null) continue;
       if (![...wave.get(id)!].some((key) => hasField(cfg, rec.sets, key))) continue;
       if (++recomputed > limit) return [{ code: 'validation', message: 'каскад превысил лимит' }];
-      const seed = await recompute(tx, cfg, rec, now, workspaceId, userId);
+      const { seed } = await recompute(tx, cfg, rec, now, workspaceId, userId);
       if (seed !== null) pending.push(seed);
     }
   }

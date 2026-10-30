@@ -15,3 +15,6 @@ export {
 export {
   CASCADE_LIMIT, evaluateWithRollups, refreshOwnRollups, runCascade, type CascadeSeed, type RollupHolder,
 } from './service/cascade.js';
+export {
+  recomputeFields, recomputingKeys, syncConfig, type SyncReport,
+} from './sync-config.js';

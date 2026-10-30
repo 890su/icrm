@@ -10,7 +10,7 @@ import { insertRecord, loadRecords, writeRecord, writeSets, type StoredRecord } 
 import type { Db } from '../repo/types.js';
 import type { DB } from '../schema.js';
 import {
-  archiveSeeds, changedSetKeys, evaluateWithRollups, runCascade, type CascadeSeed,
+  archiveSeeds, changedSetKeys, evaluateWithRollups, recompute, runCascade, type CascadeSeed,
 } from './cascade.js';
 import { archived, notFound, recordError, SaveFailed, versionConflict } from './errors.js';
 
@@ -229,6 +229,34 @@ export class RecordService {
       }]);
       await this.cascade(tx, i.userId, await archiveSeeds(tx, this.cfg, i.id));
       return this.reload(tx, i.id);
+    });
+  }
+
+  /**
+   * Re-evaluates the given records after the config changed (spec §1.11), in one transaction: they are
+   * locked `FOR UPDATE` in id order, evaluated from their stored state with no user input (own rollups
+   * included) and written when anything changed, logged with `source`; what changed then cascades to the
+   * rollups of linked records (logged as `cascade`). Missing, foreign and archived records are skipped.
+   *
+   * Errors of the records themselves (required, validate, ...) do not roll anything back: they are returned,
+   * each message prefixed with the record id. Exceeding the cascade limit is not a record error: it throws
+   * and rolls the batch back.
+   */
+  async recompute(ids: string[], userId: string | null, source: 'system'): Promise<RecordError[]> {
+    return this.db.transaction().execute(async (tx) => {
+      const records = await loadRecords(tx, ids, { forUpdate: true });
+      const errors: RecordError[] = [];
+      const seeds: CascadeSeed[] = [];
+      for (const id of [...records.keys()].sort()) {
+        const rec = records.get(id)!;
+        if (rec.workspaceId !== this.workspaceId || rec.archivedAt !== null) continue;
+        const res = await recompute(tx, this.cfg, rec, this.now(), this.workspaceId, userId, source);
+        if (res.seed !== null) seeds.push(res.seed);
+        for (const e of res.errors) errors.push({ ...e, message: `Запись ${id}: ${e.message}` });
+      }
+      const cascadeErrors = await runCascade(tx, this.cfg, seeds, this.now(), this.workspaceId, userId);
+      if (cascadeErrors.length > 0) throw new Error(cascadeErrors.map((e) => e.message).join('; '));
+      return errors;
     });
   }
 
