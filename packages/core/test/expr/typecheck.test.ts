@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   ExprTypeError, FUNCTIONS, fieldRefs, parse, setRefs, typecheck, usesClock,
-  type ExprType, type TypeEnv,
+  type EvalCtx, type ExprType, type TypeEnv, type Value,
 } from '../../src/index.js';
 
 function mkEnv(fields: Record<string, ExprType>, sets: string[] = []): TypeEnv {
@@ -127,6 +127,9 @@ describe('expression typechecker', () => {
     expect(tc('MIN({hours}, {rate}, 3)')).toBe('number');
     expect(tc('MAX({cost}, {cost})')).toBe('money');
     expect(tc('MAX({due_date}, TODAY())')).toBe('date');
+    expect(tc('MIN(NOW(), NOW())')).toBe('datetime');
+    expect(tc('MAX(NOW(), NULL)')).toBe('datetime');
+    expect(() => tc('MAX(NOW(), TODAY())')).toThrow(ExprTypeError);
     expect(() => tc('MIN({hours}, {cost})')).toThrow(ExprTypeError);
     expect(() => tc('MIN({kind}, "a")')).toThrow(ExprTypeError);
   });
@@ -149,9 +152,40 @@ describe('expression typechecker', () => {
       'ADD_DAYS', 'AND', 'COALESCE', 'CONCAT', 'CONTAINS', 'DATE', 'DAYS_BETWEEN', 'HAS_SET', 'IF', 'IN',
       'IS_EMPTY', 'LEN', 'MAX', 'MIN', 'NOT', 'NOW', 'OR', 'ROUND', 'TODAY',
     ]);
+    for (const [name, spec] of FUNCTIONS) expect(spec.name).toBe(name);
+  });
+
+  test('every registered function has a working impl', () => {
+    const evalCtx: EvalCtx = {
+      get: () => null, hasSet: (k) => k === 'montage', now: new Date('2026-10-30T10:00:00Z'), timezone: 'Europe/Warsaw',
+    };
+    const money = { amount: '2', currency: 'PLN' };
+    // One valid call per function, with the expected (non-null) result.
+    const valid: Record<string, [Value[], Value]> = {
+      IF: [[true, 1, 2], 1],
+      AND: [[true, true], true],
+      OR: [[false, true], true],
+      NOT: [[false], true],
+      IS_EMPTY: [[''], true],
+      HAS_SET: [['montage'], true],
+      IN: [['b', 'a', 'b'], true],
+      CONTAINS: [[['a', 'b'], 'b'], true],
+      TODAY: [[], '2026-10-30'],
+      NOW: [[], '2026-10-30T10:00:00.000Z'],
+      DAYS_BETWEEN: [['2026-10-01', '2026-10-30'], 29],
+      ADD_DAYS: [['2026-10-30', 2], '2026-11-01'],
+      ROUND: [[1.26, 1], 1.3],
+      MIN: [[3, 1, 2], 1],
+      MAX: [[money, { amount: '5', currency: 'PLN' }], { amount: '5', currency: 'PLN' }],
+      LEN: [['abc'], 3],
+      CONCAT: [['a', 1], 'a1'],
+      COALESCE: [[null, 7], 7],
+      DATE: [['2026-10-30'], '2026-10-30'],
+    };
+    expect(Object.keys(valid).sort()).toEqual([...FUNCTIONS.keys()].sort());
     for (const [name, spec] of FUNCTIONS) {
-      expect(spec.name).toBe(name);
-      expect(typeof spec.impl).toBe('function');
+      const [args, expected] = valid[name]!;
+      expect(spec.impl(args, evalCtx), name).toEqual(expected);
     }
   });
 
