@@ -124,6 +124,21 @@ describe('evaluateRecord: stabilization', () => {
     expect(r.state.sets.get('base')).toBe('manual');
   });
 
+  test('default is not re-applied while its rule stays active: a cleared field stays empty', () => {
+    const saved = stateOf({ kind: 'montage' });
+    expect(saved.data.warranty_months).toBe(12);
+    const r = runFrom(saved, { warranty_months: null });
+    expect(r.state.data.warranty_months).toBeNull();
+    expect(r.errors).toEqual([]);
+  });
+
+  test('default fills again when its rule is re-activated', () => {
+    const cleared = runFrom(stateOf({ kind: 'montage' }), { warranty_months: null }).state;
+    const visit = runFrom(cleared, { kind: 'visit' }).state;
+    expect(visit.data.warranty_months).toBeNull();
+    expect(runFrom(visit, { kind: 'montage' }).state.data.warranty_months).toBe(12);
+  });
+
   test('stable result reports the active rules', () => {
     expect(run({ kind: 'montage', done: true, act_file: F }, { task: 'manual' }).activeRules)
       .toEqual(['montage_by_kind', 'act_required_on_done', 'warranty_default']);

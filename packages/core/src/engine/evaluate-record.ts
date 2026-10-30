@@ -122,10 +122,17 @@ function applySetRules(cfg: CompiledConfig, sets: Map<string, string>, active: C
   return result;
 }
 
-/** Fills empty fields from the `default` of active rules (first rule wins). Mutates `s.data`. */
-function applyDefaults(cfg: CompiledConfig, s: RecordState, active: CompiledRule[], now: Date): void {
+/**
+ * Spec §2.3: a default is set only into an empty field and only when its rule fires, i.e. for rules
+ * active now that were not active in `prev` (every rule counts as newly active on create). A field the
+ * user clears while its rule stays active therefore stays empty. First rule wins. Mutates `s.data`.
+ */
+function applyDefaults(
+  cfg: CompiledConfig, s: RecordState, active: CompiledRule[], activeInPrev: Set<string>, now: Date,
+): void {
   const ctx = ctxOf(cfg, s, now);
   for (const r of active) {
+    if (activeInPrev.has(r.id)) continue;
     for (const [key, ast] of Object.entries(r.defaultAsts)) {
       if (!isEmpty(get(s.data, key))) continue;
       const v = evaluate(ast, ctx);
@@ -268,6 +275,7 @@ export function evaluateRecord(
   const { now, userChangedKeys } = opts;
   const s: RecordState = { data: { ...next.data }, sets: new Map(next.sets) };
   const history: Set<string>[] = [];
+  const activeInPrev = new Set(prev === null ? [] : activeRulesOf(cfg, prev, now).map((r) => r.id));
   let stable = false;
 
   for (let pass = 0; pass < MAX_PASSES && !stable; pass++) {
@@ -276,7 +284,7 @@ export function evaluateRecord(
     const active = activeRulesOf(cfg, s, now);
     history.push(new Set(active.map((r) => r.id)));
     s.sets = applySetRules(cfg, s.sets, active);
-    applyDefaults(cfg, s, active, now);
+    applyDefaults(cfg, s, active, activeInPrev, now);
     const keys = new Set([...Object.keys(before.data), ...Object.keys(s.data)]);
     stable = sameSets(before.sets, s.sets) && [...keys].every((k) => sameValue(before.data[k], s.data[k]));
   }
