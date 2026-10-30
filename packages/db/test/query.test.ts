@@ -133,6 +133,8 @@ const FILTERS = [
   '{done} = TRUE', '{done} = FALSE', '{done} <> TRUE', 'IS_EMPTY({done})', 'TRUE', 'FALSE', 'NULL = NULL',
   // text, dates, datetimes
   '{notes} = ""', '{notes} <> ""', '{notes} = "камера"', '{notes} > "б"', '{notes} <= "Камера СКЛАД"', 'IS_EMPTY({due_date})',
+  '{due_date} < DATE("2026-11-01")', '{due_date} = DATE("2026-10-30")', 'DATE("2026-01-01") < {due_date}',
+  'DATE("2026-01-01") < TODAY()', '{due_date} >= DATE("2026-10-01") AND {due_date} <= DATE("2026-12-31")',
   '{due_date} >= TODAY()', '{due_date} = TODAY()', '{due_date} <> TODAY()', '{seen_at} < NOW()', '{seen_at} = NOW()',
   '{seen_at} >= NOW()', 'IS_EMPTY({seen_at})',
   // contains / in
@@ -215,7 +217,7 @@ describe('errors', () => {
 
   test.each([
     ['ROUND({hours}) > 1'], ['{hours} + 1 > 2'], ['{hours} * {a} > 1'], ['-{hours} < 0'], ['IF({done}, TRUE, FALSE)'],
-    ['COALESCE({hours}, 0) > 1'], ['{notes} & "x" = "y"'], ['DAYS_BETWEEN({due_date}, TODAY()) > 1'],
+    ['COALESCE({hours}, 0) > 1'], ['{due_date} < ADD_DAYS(TODAY(), 7)'], ['{notes} & "x" = "y"'], ['DAYS_BETWEEN({due_date}, TODAY()) > 1'],
   ])('unsupported: %s', async (filter) => {
     await reject({ filter }).toMatchObject({ code: 'unsupported_in_filter' });
   });

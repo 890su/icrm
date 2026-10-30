@@ -216,6 +216,12 @@ class FilterCompiler {
         return bool(sql`(${sql.join(any, sql` or `)})`);
       }
       case 'CONTAINS': return bool(this.contains(e));
+      case 'DATE': {
+        // typecheck has already validated the literal as YYYY-MM-DD
+        const lit = e.args[0];
+        if (lit?.k !== 'str') throw new QueryError('type', 'DATE принимает только строковый литерал', e);
+        return { type: 'date', sql: sql`${lit.v}::text` };
+      }
       case 'TODAY': return { type: 'date', sql: sql`${todayIn(this.now, this.cfg.timezone)}::text` };
       case 'NOW': return { type: 'datetime', sql: sql`${this.now.toISOString()}::text` };
       default: return unsupported(`Функция ${e.fn}`, e);
