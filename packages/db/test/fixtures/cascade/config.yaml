@@ -26,6 +26,22 @@ fields:
     agg: count
     filter: 'NOT({done})'
   work_note: {type: text, label: Заметка по работам}
+  open_hours:
+    type: rollup
+    label: Часы открытых задач
+    via: conversation
+    direction: inverse
+    field: hours
+    agg: sum
+    filter: 'NOT({done})'
+  billable: {type: bool, label: Выставлять счёт}
+  billed_hours:
+    type: rollup
+    label: Часы к счёту
+    via: conversation
+    direction: inverse
+    field: hours
+    agg: sum
   cost_cap: {type: number, label: Лимит стоимости}
   parent_task:
     type: link
@@ -45,14 +61,18 @@ fields:
   total_hours: {type: formula, label: Часы всего, expr: '{own_hours} + COALESCE({children_total}, 0)'}
   watchers: {type: link, label: Наблюдатели, target_sets: [contact]}
 sets:
-  conversation: {label: Разговор, fields: [title, tasks_cost_total, open_tasks_count, cost_cap]}
-  has_work: {label: Есть работа, activation: rule, fields: [work_note]}
+  conversation: {label: Разговор, fields: [title, tasks_cost_total, open_tasks_count, cost_cap, billable]}
+  has_work: {label: Есть работа, activation: rule, fields: [work_note, open_hours]}
+  billing: {label: Счёт, activation: rule, fields: [billed_hours]}
   task:
     label: Задача
     fields: [title, hours, rate, labor_cost, done, conversation, conversation_title,
              parent_task, own_hours, children_total, total_hours]
   contact: {label: Контакт, fields: [title, watchers]}
 rules:
+  - id: billing_when_billable
+    when: '{billable}'
+    enable_set: billing
   - id: has_work_when_open
     when: '{open_tasks_count} > 0'
     enable_set: has_work

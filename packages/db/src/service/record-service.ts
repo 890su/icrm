@@ -1,5 +1,5 @@
 import {
-  evaluateRecord, fieldStatesOf,
+  fieldStatesOf,
   type CompiledConfig, type EvalResult, type FieldState, type RecordError, type RecordState, type Value,
 } from '@icrm/core';
 import type { Kysely, Transaction } from 'kysely';
@@ -10,7 +10,7 @@ import { insertRecord, loadRecords, writeRecord, writeSets, type StoredRecord } 
 import type { Db } from '../repo/types.js';
 import type { DB } from '../schema.js';
 import {
-  archiveSeeds, changedSetKeys, refreshOwnRollups, runCascade, type CascadeSeed,
+  archiveSeeds, changedSetKeys, evaluateWithRollups, runCascade, type CascadeSeed,
 } from './cascade.js';
 import { archived, notFound, recordError, SaveFailed, versionConflict } from './errors.js';
 
@@ -139,7 +139,7 @@ export class RecordService {
       }
       await writeSets(tx, id, sets, res.state.sets);
       await appendChangeLog(tx, this.changeEntries(id, i.userId, null, res, userChangedKeys));
-      await this.cascade(tx, [{
+      await this.cascade(tx, i.userId, [{
         recordId: id, changedKeys: res.changedKeys, changedSets: new Set(res.state.sets.keys()), changedLinks,
       }]);
       return this.reload(tx, id);
@@ -172,7 +172,7 @@ export class RecordService {
       if (!written) throw new SaveFailed([versionConflict(i.id)]);
       await writeSets(tx, i.id, stored.sets, res.state.sets);
       await appendChangeLog(tx, this.changeEntries(i.id, i.userId, prev, res, userChangedKeys));
-      await this.cascade(tx, [{
+      await this.cascade(tx, i.userId, [{
         recordId: i.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
         changedLinks: [],
       }]);
@@ -201,7 +201,7 @@ export class RecordService {
       if (!written) throw new SaveFailed([versionConflict(i.id)]);
       await writeSets(tx, i.id, stored.sets, res.state.sets);
       await appendChangeLog(tx, this.changeEntries(i.id, i.userId, prev, res, userChangedKeys));
-      await this.cascade(tx, [{
+      await this.cascade(tx, i.userId, [{
         recordId: i.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
         changedLinks: [change],
       }]);
@@ -224,7 +224,7 @@ export class RecordService {
         workspaceId: this.workspaceId, recordId: i.id, userId: i.userId, kind: 'archive', fieldKey: null,
         old: null, new: archivedAt.toISOString(), source: 'user',
       }]);
-      await this.cascade(tx, await archiveSeeds(tx, this.cfg, i.id));
+      await this.cascade(tx, i.userId, await archiveSeeds(tx, this.cfg, i.id));
       return this.reload(tx, i.id);
     });
   }
@@ -299,21 +299,20 @@ export class RecordService {
   }
 
   /**
-   * Recomputes the record's own rollups into `next.data` (so formulas and rules see current totals),
-   * runs the engine and fails the save on any error.
+   * Runs the engine with the record's own rollups current (including rollups of sets the rules enable
+   * in this save) and fails the save on any error.
    */
   private async evaluate(
     tx: Db, id: string, prev: RecordState | null, next: RecordState, userChangedKeys: Set<string>,
   ): Promise<EvalResult> {
-    await refreshOwnRollups(tx, this.cfg, { id, data: next.data, sets: next.sets }, this.now());
-    const res = evaluateRecord(this.cfg, prev, next, { now: this.now(), userChangedKeys });
+    const res = await evaluateWithRollups(tx, this.cfg, id, prev, next, { now: this.now(), userChangedKeys });
     if (res.errors.length > 0) throw new SaveFailed(res.errors);
     return res;
   }
 
   /** After the originating record is written: propagates its changes to the rollups of linked records. */
-  private async cascade(tx: Db, seeds: CascadeSeed[]): Promise<void> {
-    const errors = await runCascade(tx, this.cfg, seeds, this.now(), this.workspaceId);
+  private async cascade(tx: Db, userId: string, seeds: CascadeSeed[]): Promise<void> {
+    const errors = await runCascade(tx, this.cfg, seeds, this.now(), this.workspaceId, userId);
     if (errors.length > 0) throw new SaveFailed(errors);
   }
 

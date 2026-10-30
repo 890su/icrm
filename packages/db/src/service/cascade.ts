@@ -1,6 +1,7 @@
 import {
   computeRollup, evaluateRecord, rollupsFedBy, rollupsVia,
-  type CompiledConfig, type RecordError, type RecordState, type RelatedRecord, type Value,
+  type CompiledConfig, type EvalOptions, type EvalResult, type RecordError, type RecordState, type RelatedRecord,
+  type Value,
 } from '@icrm/core';
 import { appendChangeLog, type ChangeEntry } from '../repo/change-log.js';
 import { linksFrom, linksTo } from '../repo/links.js';
@@ -9,6 +10,9 @@ import type { Db } from '../repo/types.js';
 
 /** Spec §1.8: at most this many record recomputations in the cascade of one save. */
 export const CASCADE_LIMIT = 10_000;
+
+/** At most this many evaluations of one record while rules keep enabling sets with uncomputed rollups. */
+const MAX_ROLLUP_ROUNDS = 3;
 
 /** What changed on one record, from the cascade's point of view. */
 export interface CascadeSeed {
@@ -53,11 +57,15 @@ async function relatedRecords(tx: Db, ids: string[]): Promise<RelatedRecord[]> {
  * Recomputes every rollup of `rec` that belongs to one of its enabled sets and writes the values into
  * `rec.data`, so that `evaluateRecord` sees current totals. Forward rollups read the targets of the
  * record's own link, inverse ones the records linking to it.
+ * Rollups whose keys are in `done` are skipped; the keys computed here are added to it. Returns `done`.
  */
-export async function refreshOwnRollups(tx: Db, cfg: CompiledConfig, rec: RollupHolder, now: Date): Promise<void> {
+export async function refreshOwnRollups(
+  tx: Db, cfg: CompiledConfig, rec: RollupHolder, now: Date, done: Set<string> = new Set(),
+): Promise<Set<string>> {
   const related = new Map<string, RelatedRecord[]>();
   for (const r of cfg.rollups) {
-    if (!hasField(cfg, rec.sets, r.key)) continue;
+    if (done.has(r.key) || !hasField(cfg, rec.sets, r.key)) continue;
+    done.add(r.key);
     const cacheKey = `${r.direction}:${r.via}`;
     let records = related.get(cacheKey);
     if (records === undefined) {
@@ -66,6 +74,30 @@ export async function refreshOwnRollups(tx: Db, cfg: CompiledConfig, rec: Rollup
       related.set(cacheKey, records);
     }
     rec.data[r.key] = computeRollup(cfg, r, records, now);
+  }
+  return done;
+}
+
+/**
+ * `evaluateRecord` with the record's own rollups current. Rollups of the sets enabled in `next` are
+ * refreshed first; when the rules enable a set with a rollup not computed yet, that rollup is refreshed
+ * and the record evaluated again (from `next`), at most `MAX_ROLLUP_ROUNDS` times, after which an
+ * `oscillation` error is added. `next` is not mutated.
+ */
+export async function evaluateWithRollups(
+  tx: Db, cfg: CompiledConfig, id: string, prev: RecordState | null, next: RecordState, opts: EvalOptions,
+): Promise<EvalResult> {
+  const data = { ...next.data };
+  const done = await refreshOwnRollups(tx, cfg, { id, data, sets: next.sets }, opts.now);
+  for (let round = 1; ; round++) {
+    const res = evaluateRecord(cfg, prev, { data, sets: next.sets }, opts);
+    const missing = cfg.rollups.some((r) => !done.has(r.key) && hasField(cfg, res.state.sets, r.key));
+    if (!missing) return res;
+    if (round === MAX_ROLLUP_ROUNDS) {
+      const message = `Наборы с итоговыми полями не стабилизировались за ${MAX_ROLLUP_ROUNDS} прохода`;
+      return { ...res, errors: [...res.errors, { code: 'oscillation', message }] };
+    }
+    await refreshOwnRollups(tx, cfg, { id, data, sets: res.state.sets }, opts.now, done);
   }
 }
 
@@ -114,12 +146,10 @@ async function affectedBy(tx: Db, cfg: CompiledConfig, seeds: CascadeSeed[]): Pr
  * so its computed state is stored anyway. Returns what changed, or null.
  */
 async function recompute(
-  tx: Db, cfg: CompiledConfig, rec: StoredRecord, now: Date, workspaceId: string,
+  tx: Db, cfg: CompiledConfig, rec: StoredRecord, now: Date, workspaceId: string, userId: string | null,
 ): Promise<CascadeSeed | null> {
   const prev: RecordState = { data: { ...rec.data, title: rec.title }, sets: new Map(rec.sets) };
-  const next: RecordState = { data: { ...prev.data }, sets: new Map(prev.sets) };
-  await refreshOwnRollups(tx, cfg, { id: rec.id, data: next.data, sets: next.sets }, now);
-  const res = evaluateRecord(cfg, prev, next, { now, userChangedKeys: new Set() });
+  const res = await evaluateWithRollups(tx, cfg, rec.id, prev, prev, { now, userChangedKeys: new Set() });
 
   const changedSets = changedSetKeys(prev.sets, res.state.sets);
   const relabelled = [...res.state.sets].some(([k, by]) => prev.sets.has(k) && prev.sets.get(k) !== by);
@@ -131,7 +161,7 @@ async function recompute(
   }
   await writeSets(tx, rec.id, rec.sets, res.state.sets);
 
-  const base = { workspaceId, recordId: rec.id, userId: null, source: 'cascade' as const };
+  const base = { workspaceId, recordId: rec.id, userId, source: 'cascade' as const };
   const entries = [...res.changedKeys].map((key): ChangeEntry => ({
     ...base, kind: 'value', fieldKey: key, old: prev.data[key] ?? null, new: res.state.data[key] ?? null,
   }));
@@ -150,10 +180,13 @@ async function recompute(
  * (a tree is climbed one level per wave). Archived records, records of other workspaces and records
  * without the affected rollup in an enabled set are skipped.
  *
+ * Log entries carry `userId`, the user whose save started the cascade.
+ *
  * Returns the errors that must roll the save back: only exceeding `limit` recomputations.
  */
 export async function runCascade(
-  tx: Db, cfg: CompiledConfig, seeds: CascadeSeed[], now: Date, workspaceId: string, limit = CASCADE_LIMIT,
+  tx: Db, cfg: CompiledConfig, seeds: CascadeSeed[], now: Date, workspaceId: string, userId: string | null,
+  limit = CASCADE_LIMIT,
 ): Promise<RecordError[]> {
   let pending = seeds;
   let recomputed = 0;
@@ -167,7 +200,7 @@ export async function runCascade(
       if (rec.workspaceId !== workspaceId || rec.archivedAt !== null) continue;
       if (![...wave.get(id)!].some((key) => hasField(cfg, rec.sets, key))) continue;
       if (++recomputed > limit) return [{ code: 'validation', message: 'каскад превысил лимит' }];
-      const seed = await recompute(tx, cfg, rec, now, workspaceId);
+      const seed = await recompute(tx, cfg, rec, now, workspaceId, userId);
       if (seed !== null) pending.push(seed);
     }
   }

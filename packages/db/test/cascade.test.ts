@@ -176,16 +176,38 @@ describe('rollups over links', () => {
     ]);
   });
 
+  test('a set enabled by a rule gets its rollups in the same save', async () => {
+    const conv = await mk(['conversation']);
+    await mk(['task'], { hours: 2 }, { conversation: [conv.id] });
+    await mk(['task'], { hours: 3, done: true }, { conversation: [conv.id] });
+    const before = await get(conv.id);
+    expect(setKeys(before)).not.toContain('billing');
+    expect(before.data.billed_hours ?? null).toBeNull();
+
+    const after = record(await svc.update({ id: conv.id, userId, expectedVersion: before.version, data: { billable: true } }));
+    expect(after.sets).toContainEqual({ key: 'billing', enabledBy: 'rule:billing_when_billable' });
+    expect(after.data.billed_hours).toBe(5);
+  });
+
+  test('a set enabled by a rule inside the cascade gets its rollups in the same cascade', async () => {
+    const conv = await mk(['conversation']);
+    expect(setKeys(conv)).not.toContain('has_work');
+    await mk(['task'], { hours: 2, done: false }, { conversation: [conv.id] });
+    const c = await get(conv.id);
+    expect(setKeys(c)).toContain('has_work');
+    expect(c.data.open_hours).toBe(2);
+  });
+
   test('cascade entries logged with source cascade', async () => {
     const conv = await mk(['conversation']);
     const t = await mk(['task'], { hours: 2, rate: 50 }, { conversation: [conv.id] });
     record(await svc.update({ id: t.id, userId, expectedVersion: t.version, data: { hours: 4 } }));
 
     const log = (await changeLog(conv.id)).filter((e) => e.field_key === 'tasks_cost_total');
-    expect(log.map((e) => [e.kind, e.old, e.new, e.source])).toEqual([
-      ['value', null, 0, 'rule'],
-      ['value', 0, 100, 'cascade'],
-      ['value', 100, 200, 'cascade'],
+    expect(log.map((e) => [e.kind, e.old, e.new, e.source, e.user_id])).toEqual([
+      ['value', null, 0, 'rule', userId],
+      ['value', 0, 100, 'cascade', userId],
+      ['value', 100, 200, 'cascade', userId],
     ]);
     const taskLog = (await changeLog(t.id)).filter((e) => e.kind === 'link');
     expect(taskLog).toEqual([
@@ -216,7 +238,7 @@ describe('rollups over links', () => {
       await sql`update records set data = data || ${JSON.stringify({ own_hours: hours, total_hours: hours })}::jsonb
                  where id = ${leaf.id}`.execute(tx);
       const seed = { recordId: leaf.id, changedKeys: new Set(['total_hours']), changedSets: new Set<string>(), changedLinks: [] };
-      return runCascade(tx, cfg, [seed], NOW, workspaceId, limit);
+      return runCascade(tx, cfg, [seed], NOW, workspaceId, userId, limit);
     });
     // Five ancestors change one after another: four fit under the limit, the fifth exceeds it.
     await expect(cascadeWithLimit(2, 4)).resolves.toEqual([{ code: 'validation', message: 'каскад превысил лимит' }]);

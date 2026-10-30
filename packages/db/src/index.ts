@@ -13,5 +13,5 @@ export {
   type UpdateInput,
 } from './service/record-service.js';
 export {
-  CASCADE_LIMIT, refreshOwnRollups, runCascade, type CascadeSeed, type RollupHolder,
+  CASCADE_LIMIT, evaluateWithRollups, refreshOwnRollups, runCascade, type CascadeSeed, type RollupHolder,
 } from './service/cascade.js';
