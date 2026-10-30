@@ -336,6 +336,10 @@ export function compileConfig(raw: RawConfig): CompiledConfig {
         err(sub, `default: поле "${fk}" не найдено`);
         continue;
       }
+      if (isComputed(field)) {
+        err(sub, `default: значение по умолчанию нельзя задать вычисляемому полю "${fk}"`);
+        continue;
+      }
       if (ast === undefined) continue;
       defaultAsts[fk] = ast;
       const t = check(ast, (m) => err(sub, m));

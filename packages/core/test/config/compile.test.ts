@@ -134,6 +134,23 @@ rules:
     ]);
   });
 
+  test('default on a computed field is an issue; require/readonly/show/hide on it are allowed', () => {
+    const base = `fields:
+  h: {type: number, label: H}
+  f: {type: formula, label: F, expr: '{h} * 2'}
+  items: {type: link, label: I, target_sets: [t]}
+  r: {type: rollup, label: R, via: items, field: h, agg: sum}
+${SET_T}
+rules:
+  - id: x
+    when: 'TRUE'
+`;
+    const issues = compileIssues(`${base}    default: {f: '1', r: '2'}`);
+    expect(issues.map((i) => i.path)).toEqual(['rules[0].default.f', 'rules[0].default.r']);
+    expect(issues[0]!.message).toContain('нельзя задать вычисляемому полю');
+    expect(() => compile(`${base}    require: [f, r]\n    readonly: [f]\n    show: [r]\n    hide: [f]`)).not.toThrow();
+  });
+
   test('rollup structural and typing issues', () => {
     const issues = compileIssues(`fields:
   t: {type: text, label: T}
