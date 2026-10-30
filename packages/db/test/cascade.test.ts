@@ -189,6 +189,21 @@ describe('rollups over links', () => {
     expect(after.data.billed_hours).toBe(5);
   });
 
+  test('a rollup of a set the cascade disables keeps its stored value and is not logged', async () => {
+    const conv = await mk(['conversation']);
+    const t = await mk(['task'], { hours: 2, done: false }, { conversation: [conv.id] });
+    expect((await get(conv.id)).data.open_hours).toBe(2);
+    const openHoursLog = async () => (await changeLog(conv.id)).filter((e) => e.field_key === 'open_hours');
+    expect((await openHoursLog()).map((e) => [e.kind, e.old, e.new])).toEqual([['value', null, 2]]);
+
+    record(await svc.update({ id: t.id, userId, expectedVersion: t.version, data: { done: true } }));
+    const c = await get(conv.id);
+    expect(setKeys(c)).not.toContain('has_work');
+    expect(c.data.open_tasks_count).toBe(0);
+    expect(c.data.open_hours).toBe(2);
+    expect((await openHoursLog()).map((e) => [e.kind, e.old, e.new])).toEqual([['value', null, 2]]);
+  });
+
   test('a set enabled by a rule inside the cascade gets its rollups in the same cascade', async () => {
     const conv = await mk(['conversation']);
     expect(setKeys(conv)).not.toContain('has_work');
@@ -261,6 +276,21 @@ describe('link checks', () => {
     expect(errorCodes(await svc.setLinks({ id: b.id, userId, field: 'parent_task', targetIds: [c.id] })))
       .toEqual(['link_cycle']);
     expect((await get(b.id)).links.parent_task).toEqual([]);
+  });
+
+  test('concurrent opposite hierarchical links: one succeeds, the other is a cycle', async () => {
+    for (let n = 0; n < 5; n++) {
+      const a = await mk(['task']);
+      const b = await mk(['task']);
+      const results = await Promise.all([
+        svc.setLinks({ id: a.id, userId, field: 'parent_task', targetIds: [b.id] }),
+        svc.setLinks({ id: b.id, userId, field: 'parent_task', targetIds: [a.id] }),
+      ]);
+      expect(results.filter((r) => r.ok)).toHaveLength(1);
+      expect(results.filter((r) => !r.ok).flatMap((r) => errorCodes(r))).toEqual(['link_cycle']);
+      const parents = [(await get(a.id)).links.parent_task, (await get(b.id)).links.parent_task];
+      expect(parents.filter((p) => p!.length > 0)).toHaveLength(1);
+    }
   });
 
   test('cardinality one and target sets enforced', async () => {

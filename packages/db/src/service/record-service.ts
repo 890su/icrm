@@ -2,7 +2,7 @@ import {
   fieldStatesOf,
   type CompiledConfig, type EvalResult, type FieldState, type RecordError, type RecordState, type Value,
 } from '@icrm/core';
-import type { Kysely, Transaction } from 'kysely';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import { uuidv7 } from 'uuidv7';
 import { appendChangeLog, type ChangeEntry } from '../repo/change-log.js';
 import { ancestorsVia, linksFrom, replaceLinks } from '../repo/links.js';
@@ -115,6 +115,7 @@ export class RecordService {
       const input = this.knownInput({ ...i.data, title: i.title }, null, errors);
       if (errors.length > 0) throw new SaveFailed(errors);
 
+      await this.lockHierarchies(tx, Object.keys(i.links ?? {}));
       // The row goes in first (version 0) so that links can point from it; the evaluated state
       // is written over it below, which makes it version 1.
       await insertRecord(tx, {
@@ -187,6 +188,8 @@ export class RecordService {
    */
   setLinks(i: SetLinksInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
+      // Before any row lock: the holder of the hierarchy lock may cascade into rows other savers lock.
+      await this.lockHierarchies(tx, [i.field]);
       const stored = await this.lockEditable(tx, i.id);
       const errors = await this.linkErrors(tx, i.id, stored.sets, i.field, i.targetIds);
       if (errors.length > 0) throw new SaveFailed(errors);
@@ -227,6 +230,21 @@ export class RecordService {
       await this.cascade(tx, i.userId, await archiveSeeds(tx, this.cfg, i.id));
       return this.reload(tx, i.id);
     });
+  }
+
+  /**
+   * Serialises edits of each hierarchical link field among `fields` within the workspace (a transaction
+   * advisory lock), so that two concurrent saves cannot each pass the cycle check and together close a
+   * cycle. Taken in key order, before any row lock, so lock holders never wait for each other in a ring.
+   */
+  private async lockHierarchies(tx: Db, fields: string[]): Promise<void> {
+    const hierarchical = [...new Set(fields)].filter((f) => {
+      const def = this.cfg.fields.get(f);
+      return def?.type === 'link' && def.hierarchical === true;
+    });
+    for (const field of hierarchical.sort()) {
+      await sql`select pg_advisory_xact_lock(hashtext(${this.workspaceId} || ':' || ${field}))`.execute(tx);
+    }
   }
 
   /** Locks the record for a save: it must exist in this workspace and not be archived. */

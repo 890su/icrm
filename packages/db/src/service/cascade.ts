@@ -53,51 +53,75 @@ async function relatedRecords(tx: Db, ids: string[]): Promise<RelatedRecord[]> {
   return out;
 }
 
+/** Computed rollup values and the related records behind them, for one record during one evaluation. */
+interface RollupCache {
+  related: Map<string, RelatedRecord[]>;
+  values: Map<string, Value>;
+}
+
+const newCache = (): RollupCache => ({ related: new Map(), values: new Map() });
+
+/** Keys of the rollups that belong to one of `sets`. */
+const rollupsIn = (cfg: CompiledConfig, sets: Map<string, string>): Set<string> =>
+  new Set(cfg.rollups.filter((r) => hasField(cfg, sets, r.key)).map((r) => r.key));
+
+const sameKeys = (a: Set<string>, b: Set<string>): boolean => a.size === b.size && [...a].every((k) => b.has(k));
+
 /**
- * Recomputes every rollup of `rec` that belongs to one of its enabled sets and writes the values into
- * `rec.data`, so that `evaluateRecord` sees current totals. Forward rollups read the targets of the
- * record's own link, inverse ones the records linking to it.
- * Rollups whose keys are in `done` are skipped; the keys computed here are added to it. Returns `done`.
+ * Values of record `id`'s rollups `keys`. Forward rollups read the targets of the record's own link,
+ * inverse ones the records linking to it. Values and link lookups are memoised in `cache`.
  */
-export async function refreshOwnRollups(
-  tx: Db, cfg: CompiledConfig, rec: RollupHolder, now: Date, done: Set<string> = new Set(),
-): Promise<Set<string>> {
-  const related = new Map<string, RelatedRecord[]>();
+async function ownRollupValues(
+  tx: Db, cfg: CompiledConfig, id: string, keys: Set<string>, now: Date, cache: RollupCache,
+): Promise<Map<string, Value>> {
   for (const r of cfg.rollups) {
-    if (done.has(r.key) || !hasField(cfg, rec.sets, r.key)) continue;
-    done.add(r.key);
-    const cacheKey = `${r.direction}:${r.via}`;
-    let records = related.get(cacheKey);
+    if (!keys.has(r.key) || cache.values.has(r.key)) continue;
+    const relatedKey = `${r.direction}:${r.via}`;
+    let records = cache.related.get(relatedKey);
     if (records === undefined) {
-      const ids = r.direction === 'forward' ? await linksFrom(tx, rec.id, r.via) : await linksTo(tx, rec.id, r.via);
+      const ids = r.direction === 'forward' ? await linksFrom(tx, id, r.via) : await linksTo(tx, id, r.via);
       records = await relatedRecords(tx, ids);
-      related.set(cacheKey, records);
+      cache.related.set(relatedKey, records);
     }
-    rec.data[r.key] = computeRollup(cfg, r, records, now);
+    cache.values.set(r.key, computeRollup(cfg, r, records, now));
   }
-  return done;
+  return cache.values;
 }
 
 /**
- * `evaluateRecord` with the record's own rollups current. Rollups of the sets enabled in `next` are
- * refreshed first; when the rules enable a set with a rollup not computed yet, that rollup is refreshed
- * and the record evaluated again (from `next`), at most `MAX_ROLLUP_ROUNDS` times, after which an
- * `oscillation` error is added. `next` is not mutated.
+ * Recomputes every rollup of `rec` that belongs to one of its enabled sets and writes the values into
+ * `rec.data`. Saves use `evaluateWithRollups`, which also follows the sets the rules switch.
+ */
+export async function refreshOwnRollups(tx: Db, cfg: CompiledConfig, rec: RollupHolder, now: Date): Promise<void> {
+  const keys = rollupsIn(cfg, rec.sets);
+  const values = await ownRollupValues(tx, cfg, rec.id, keys, now, newCache());
+  for (const key of keys) rec.data[key] = values.get(key) ?? null;
+}
+
+/**
+ * `evaluateRecord` with the record's own rollups current. Exactly the rollups of the sets enabled in the
+ * FINAL evaluated state are recomputed; every other rollup keeps its value from `next` (the stored one),
+ * as fields of disabled sets are not touched. Starting from the sets of `next`, the record is evaluated
+ * again (always from `next`) while the rules change which rollups are enabled, at most
+ * `MAX_ROLLUP_ROUNDS` times, after which an `oscillation` error is added. `next` is not mutated.
  */
 export async function evaluateWithRollups(
   tx: Db, cfg: CompiledConfig, id: string, prev: RecordState | null, next: RecordState, opts: EvalOptions,
 ): Promise<EvalResult> {
-  const data = { ...next.data };
-  const done = await refreshOwnRollups(tx, cfg, { id, data, sets: next.sets }, opts.now);
+  const cache = newCache();
+  let keys = rollupsIn(cfg, next.sets);
   for (let round = 1; ; round++) {
+    const values = await ownRollupValues(tx, cfg, id, keys, opts.now, cache);
+    const data = { ...next.data };
+    for (const key of keys) data[key] = values.get(key) ?? null;
     const res = evaluateRecord(cfg, prev, { data, sets: next.sets }, opts);
-    const missing = cfg.rollups.some((r) => !done.has(r.key) && hasField(cfg, res.state.sets, r.key));
-    if (!missing) return res;
+    const enabled = rollupsIn(cfg, res.state.sets);
+    if (sameKeys(keys, enabled)) return res;
     if (round === MAX_ROLLUP_ROUNDS) {
       const message = `Наборы с итоговыми полями не стабилизировались за ${MAX_ROLLUP_ROUNDS} прохода`;
       return { ...res, errors: [...res.errors, { code: 'oscillation', message }] };
     }
-    await refreshOwnRollups(tx, cfg, { id, data, sets: res.state.sets }, opts.now, done);
+    keys = enabled;
   }
 }
 
