@@ -16,3 +16,8 @@ export { compileConfig } from './config/compile.js';
 export type {
   CompiledConfig, CompiledField, CompiledRollup, CompiledRule, CompiledSet,
 } from './config/compile.js';
+export { validateValue } from './engine/values.js';
+export { evaluateRecord, fieldStatesOf } from './engine/evaluate-record.js';
+export type {
+  ErrorCode, EvalOptions, EvalResult, FieldState, RecordError, RecordState,
+} from './engine/evaluate-record.js';

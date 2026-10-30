@@ -1,0 +1,13 @@
+# r_on enables `a` while `b` is off; r_off enables `b` while `a` is on.
+# Together they cycle {} → {a} → {a, b} → {b} → {} and never stabilize.
+sets:
+  base: {label: Base, fields: []}
+  a: {label: A, activation: rule, fields: []}
+  b: {label: B, activation: rule, fields: []}
+rules:
+  - id: r_on
+    when: 'NOT(HAS_SET("b"))'
+    enable_set: a
+  - id: r_off
+    when: 'HAS_SET("a")'
+    enable_set: b
