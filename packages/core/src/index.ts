@@ -7,3 +7,8 @@ export { ExprTypeError, typecheck } from './expr/typecheck.js';
 export { evaluate, isEmpty, todayIn } from './expr/evaluate.js';
 export { fieldRefs, setRefs, usesClock } from './expr/refs.js';
 export { FUNCTIONS, type FnSpec } from './expr/functions.js';
+export { ConfigError, type ConfigIssue } from './config/errors.js';
+export type {
+  Agg, FieldDef, FieldType, RawConfig, RuleDef, SetDef, SourceRef,
+} from './config/schema.js';
+export { parseConfigFiles } from './config/parse.js';
