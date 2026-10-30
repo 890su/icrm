@@ -18,3 +18,6 @@ export {
 export {
   recomputeFields, recomputingKeys, syncConfig, type SyncReport,
 } from './sync-config.js';
+export {
+  queryRecords, QueryError, type QueryErrorCode, type QueryInput, type QueryOutput,
+} from './query.js';
