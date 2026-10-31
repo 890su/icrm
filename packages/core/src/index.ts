@@ -25,3 +25,8 @@ export type {
 } from './engine/evaluate-record.js';
 export { computeRollup, type RelatedRecord } from './engine/aggregate.js';
 export { rollupsFedBy, rollupsVia } from './engine/cascade-plan.js';
+export {
+  emailDomainOf, identityChannel, normalizeAddress, normalizeEmailDomain, normalizeNip,
+  PUBLIC_EMAIL_DOMAINS,
+} from './contacts/normalize.js';
+export type { Channel, Normalized } from './contacts/normalize.js';
