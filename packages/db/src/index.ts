@@ -9,8 +9,8 @@ export {
 export { ancestorsVia, linksFrom, linksTo, replaceLinks } from './repo/links.js';
 export { appendChangeLog, type ChangeEntry } from './repo/change-log.js';
 export {
-  RecordService, type ArchiveInput, type CreateInput, type RecordView, type SaveResult, type SetLinksInput,
-  type UpdateInput,
+  RecordService, type ArchiveInput, type CreateInput, type RecomputeError, type RecordView, type SaveResult,
+  type SetLinksInput, type UpdateInput,
 } from './service/record-service.js';
 export {
   CASCADE_LIMIT, evaluateWithRollups, refreshOwnRollups, runCascade, type CascadeSeed, type RollupHolder,

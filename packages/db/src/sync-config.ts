@@ -1,7 +1,7 @@
 import { KEY_RE, type CompiledConfig } from '@icrm/core';
 import { sql, type Kysely } from 'kysely';
 import type { DB } from './schema.js';
-import { RecordService } from './service/record-service.js';
+import { RecordService, type RecomputeError } from './service/record-service.js';
 
 export interface SyncReport {
   /** Field renames (`was:`) whose data was migrated by this run. */
@@ -10,6 +10,11 @@ export interface SyncReport {
   orphanKeys: string[];
   /** Formula and rollup fields whose definition changed and whose values were recomputed, sorted. */
   recomputed: string[];
+  /**
+   * Records that, once recomputed, violate the config (required, validate, ...). They are stored anyway,
+   * as the config change, not an edit, caused it; the next save of such a record must fix it.
+   */
+  recomputeErrors: RecomputeError[];
   /** Expression indexes created by this run. */
   indexes: string[];
 }
@@ -63,27 +68,28 @@ export async function syncConfig(
       return was === undefined || was.value !== signature || was.status !== 'ok';
     })
     .sort();
+  let recomputeErrors: RecomputeError[] = [];
   if (stale.length > 0) {
     for (const key of stale) await markSignature(db, workspaceId, key, storedBy.get(key)?.value ?? '', 'recomputing');
-    await recomputeFields(db, cfg, workspaceId, stale, now);
+    recomputeErrors = await recomputeFields(db, cfg, workspaceId, stale, now);
     for (const key of stale) await markSignature(db, workspaceId, key, syncSignature(cfg, key)!, 'ok');
   }
 
   const indexes = await createIndexes(db, cfg);
-  return { renamed, orphanKeys, recomputed: stale, indexes };
+  return { renamed, orphanKeys, recomputed: stale, recomputeErrors, indexes };
 }
 
 /**
  * Recomputes the given formula/rollup fields: every non-archived record of the workspace with an enabled
  * set that contains one of the fields is re-evaluated (rules, other formulas and own rollups included),
  * in batches of 500 records per transaction, with change-log source `system`; changes cascade to linked
- * records. Validation errors of individual records do not stop it.
+ * records. Validation errors of individual records do not stop it: they are returned.
  */
 export async function recomputeFields(
   db: Kysely<DB>, cfg: CompiledConfig, workspaceId: string, keys: string[], now: () => Date,
-): Promise<void> {
+): Promise<RecomputeError[]> {
   const sets = new Set(keys.flatMap((k) => [...(cfg.setsOfField.get(k) ?? [])]));
-  if (sets.size === 0) return;
+  if (sets.size === 0) return [];
   const rows = await db.selectFrom('records')
     .innerJoin('record_sets', 'record_sets.record_id', 'records.id')
     .select('records.id')
@@ -96,9 +102,11 @@ export async function recomputeFields(
   const ids = rows.map((r) => r.id);
 
   const service = new RecordService({ db, cfg, workspaceId, now });
+  const errors: RecomputeError[] = [];
   for (let i = 0; i < ids.length; i += BATCH_SIZE) {
-    await service.recompute(ids.slice(i, i + BATCH_SIZE), null, 'system');
+    errors.push(...await service.recompute(ids.slice(i, i + BATCH_SIZE), null, 'system'));
   }
+  return errors;
 }
 
 /** Keys of the fields currently marked `recomputing`, sorted. */

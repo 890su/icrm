@@ -52,7 +52,7 @@ async function get(svc: RecordService, id: string): Promise<RecordView> {
 
 const changeLog = (id: string) => db.selectFrom('change_log').selectAll().where('record_id', '=', id).orderBy('id').execute();
 
-const NOTHING = { renamed: [], orphanKeys: [], recomputed: [], indexes: [] };
+const NOTHING = { renamed: [], orphanKeys: [], recomputed: [], recomputeErrors: [], indexes: [] };
 
 const COST_V1 = `
 fields:
@@ -366,27 +366,42 @@ sets:
     expect(notDone).toEqual([]);
   });
 
-  test('errors of single records are returned and do not roll the batch back', async () => {
-    const ws = await workspace();
-    const v1 = compile(COST_V1);
-    const v2 = compile(`${COST_V2}
+  const CAPPED = `${COST_V2}
 rules:
   - id: cost_cap
     when: 'HAS_SET("task")'
     validate: '{cost} <= 15'
     message: Слишком дорого
-`);
+`;
+
+  test('errors of single records are returned per record and do not roll the batch back', async () => {
+    const ws = await workspace();
+    const [v1, v2] = [compile(COST_V1), compile(CAPPED)];
     const task = await mk(service(v1, ws), ['task'], { hours: 1, rate: 10 });
     const fine = await mk(service(v1, ws), ['task'], { hours: 0, rate: 10 });
 
     const s2 = service(v2, ws);
-    const errors = await s2.recompute([task.id, fine.id], null, 'system');
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatchObject({ code: 'validation', rule_id: 'cost_cap' });
-    expect(errors[0]!.message).toContain(task.id);
-    expect(errors[0]!.message).toContain('Слишком дорого');
+    expect(await s2.recompute([task.id, fine.id], null, 'system')).toEqual([{
+      recordId: task.id,
+      errors: [{ code: 'validation', rule_id: 'cost_cap', message: 'Слишком дорого' }],
+    }]);
     expect((await get(s2, task.id)).data.cost).toBe(20);
     expect((await get(s2, fine.id)).data.cost).toBe(0);
+  });
+
+  test('the sync report carries the errors of recomputed records', async () => {
+    const ws = await workspace();
+    const [v1, v2] = [compile(COST_V1), compile(CAPPED)];
+    const task = await mk(service(v1, ws), ['task'], { hours: 1, rate: 10 });
+    await mk(service(v1, ws), ['task'], { hours: 0, rate: 10 });
+    await syncConfig(db, v1, ws, now);
+
+    const report = await syncConfig(db, v2, ws, now);
+    expect(report.recomputed).toEqual(['cost']);
+    expect(report.recomputeErrors).toEqual([{
+      recordId: task.id,
+      errors: [{ code: 'validation', rule_id: 'cost_cap', message: 'Слишком дорого' }],
+    }]);
   });
 });
 

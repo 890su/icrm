@@ -3,6 +3,7 @@ import { ConfigError } from '@icrm/core';
 import { loadConfigDir } from '@icrm/core/node';
 import { createDb, ensureWorkspace, migrateToLatest, syncConfig } from '@icrm/db';
 import { buildServer } from './server.js';
+import { logSyncReport } from './sync-log.js';
 
 function fail(message: string): never {
   console.error(message);
@@ -40,7 +41,7 @@ const app = buildServer({ db, cfg, workspaceId, systemUserId, apiToken, logger: 
 // Recomputation after a config change can take a while: the API serves meanwhile and /meta
 // reports the fields still being recomputed.
 syncConfig(db, cfg, workspaceId, () => new Date()).then(
-  (report) => app.log.info(report, 'config synced'),
+  (report) => logSyncReport(app.log, report),
   (err: unknown) => app.log.error(err, 'config sync failed'),
 );
 
