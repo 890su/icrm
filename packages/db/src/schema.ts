@@ -4,7 +4,7 @@ type NullableTimestamp = ColumnType<Date | null, Date | string | null | undefine
 /** jsonb column: read as parsed JSON, written as a JSON string (pg would otherwise mangle arrays). */
 type Json = ColumnType<unknown, string | null | undefined, string | null>;
 
-export type ChangeKind = 'value' | 'set' | 'link' | 'archive';
+export type ChangeKind = 'value' | 'set' | 'link' | 'archive' | 'identity';
 export type ChangeSource = 'user' | 'rule' | 'cascade' | 'system';
 export type ConfigStateKind = 'signature' | 'rename';
 export type ConfigStateStatus = 'ok' | 'recomputing';
@@ -93,6 +93,20 @@ export interface ConfigStateTable {
   updated_at: Generated<Date>;
 }
 
+export interface IdentitiesTable {
+  id: string;
+  workspace_id: string;
+  /** A record with the contact, membership or organization set. */
+  owner_id: string;
+  channel: string;
+  address_normalized: string;
+  address_display: string;
+  label: string | null;
+  verified: Generated<boolean>;
+  created_at: Generated<Date>;
+  archived_at: NullableTimestamp;
+}
+
 export interface DB {
   workspaces: WorkspacesTable;
   users: UsersTable;
@@ -102,6 +116,7 @@ export interface DB {
   change_log: ChangeLogTable;
   files: FilesTable;
   config_state: ConfigStateTable;
+  identities: IdentitiesTable;
 }
 
 export type RecordRow = Selectable<RecordsTable>;

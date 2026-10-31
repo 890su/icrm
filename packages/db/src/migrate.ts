@@ -2,11 +2,13 @@ import { type Kysely, type Migration, type MigrationProvider, Migrator } from 'k
 import type { DB } from './schema.js';
 import * as m001 from './migrations/001_core.js';
 import * as m002 from './migrations/002_rows.js';
+import * as m003 from './migrations/003_contacts.js';
 
 /** In-code provider: no filesystem access, so it is path-independent (Windows, bundlers). */
 const migrations: Record<string, Migration> = {
   '001_core': m001,
   '002_rows': m002,
+  '003_contacts': m003,
 };
 
 const provider: MigrationProvider = {

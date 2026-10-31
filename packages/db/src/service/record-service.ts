@@ -6,6 +6,7 @@ import { sql, type Kysely } from 'kysely';
 import { uuidv7 } from 'uuidv7';
 import { appendChangeLog, type ChangeEntry } from '../repo/change-log.js';
 import { ancestorsVia, linksFrom, replaceLinks } from '../repo/links.js';
+import type { IdentityView } from '../repo/identities.js';
 import { insertRecord, liveRowIds, loadRecords, writeRecord, writeSets, type StoredRecord } from '../repo/records.js';
 import type { Db } from '../repo/types.js';
 import type { DB } from '../schema.js';
@@ -43,6 +44,8 @@ export interface RecordView {
    * not expanded here (`get` of the row shows them).
    */
   rows?: Record<string, RowView[]>;
+  /** The live channel addresses (spec 2a §3), oldest first; set by the contact behaviours for a record with the contact, membership or organization set. */
+  identities?: IdentityView[];
 }
 
 /** A row as shown inside its owner: a record view without its own `rows`. */

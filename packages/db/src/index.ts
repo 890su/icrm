@@ -14,6 +14,11 @@ export {
 } from './service/record-service.js';
 export type { BehaviorContext, SetBehavior } from './service/behaviors.js';
 export { UNIQUE_ERRORS, uniqueViolation } from './service/errors.js';
+export {
+  IdentityService, OWNER_SETS, type IdentityResult, type IdentityView,
+} from './contacts/identities.js';
+export { contactBehaviors } from './contacts/behaviors.js';
+export { createServices, type Services } from './services.js';
 export { isRetryable } from './service/retry.js';
 export type { ChangeRowOp, DeleteRowOp, NewRowOp, RowOp } from './service/rows.js';
 export {

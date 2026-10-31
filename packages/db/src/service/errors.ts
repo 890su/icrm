@@ -28,6 +28,8 @@ export const versionConflict = (id: string): RecordError =>
  */
 export const UNIQUE_ERRORS: Record<string, (detail: string | undefined) => RecordError> = {};
 
+UNIQUE_ERRORS.identities_live_address = () => recordError('identity_taken', 'Адрес уже принадлежит другой записи');
+
 /** The error of a Postgres unique violation (23505) of a constraint in `UNIQUE_ERRORS`; null for anything else. */
 export function uniqueViolation(e: unknown): RecordError | null {
   if (typeof e !== 'object' || e === null || !('code' in e) || e.code !== '23505') return null;

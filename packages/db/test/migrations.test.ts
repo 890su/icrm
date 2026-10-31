@@ -20,6 +20,34 @@ describe('db schema', () => {
     ).rejects.toThrow(/records_owner_pair/);
   });
 
+  test('migration 003: identities channel check and unique live address', async () => {
+    const { db, workspaceId, userId } = await freshDb();
+    const owner = uuidv7();
+    await db.insertInto('records').values({ id: owner, workspace_id: workspaceId, title: 'o', created_by: userId }).execute();
+    const row = { workspace_id: workspaceId, owner_id: owner, channel: 'email', address_normalized: 'a@b.pl', address_display: 'A@b.pl' };
+    await expect(db.insertInto('identities').values({ id: uuidv7(), ...row, channel: 'sms' }).execute())
+      .rejects.toThrow(/identities_channel_check/);
+    const first = uuidv7();
+    await db.insertInto('identities').values({ id: first, ...row }).execute();
+    await expect(db.insertInto('identities').values({ id: uuidv7(), ...row }).execute())
+      .rejects.toMatchObject({ code: '23505', constraint: 'identities_live_address' });
+    await db.updateTable('identities').set({ archived_at: new Date() }).where('id', '=', first).execute();
+    await db.insertInto('identities').values({ id: uuidv7(), ...row }).execute();
+  });
+
+  test('migration 003: a live NIP is unique, archived records free it', async () => {
+    const { db, workspaceId } = await freshDb();
+    const mk = (nip: string | null) => db.insertInto('records').values({
+      id: uuidv7(), workspace_id: workspaceId, title: 'o', data: JSON.stringify(nip === null ? {} : { nip }),
+    }).execute();
+    await mk('1234563218');
+    await mk(null);
+    await mk(null);
+    await expect(mk('1234563218')).rejects.toMatchObject({ code: '23505', constraint: 'records_live_nip' });
+    await db.updateTable('records').set({ archived_at: new Date() }).where(sql<boolean>`data->>'nip' = '1234563218'`).execute();
+    await mk('1234563218');
+  });
+
   test('ensureWorkspace is idempotent and seeds system@local', async () => {
     const { db } = await freshDb();
     const a = await ensureWorkspace(db, 'default');
