@@ -579,3 +579,105 @@ describe('rows in reads', () => {
     expect((await queryRecords(db, cfg, workspaceId, { ...f, includeArchived: true }, NOW)).total).toBe(2);
   });
 });
+
+describe('readonly owned field and target sets (spec §1.12 item 3)', () => {
+  const frozen = { code: 'readonly', field: 'expenses', rule_id: 'closed_task_frozen' };
+
+  /** A closed task (rule closed_task_frozen: `expenses` readonly) with rows a (transport 10) and b (parts 5). */
+  async function closedTask() {
+    const { owner, a, b } = await taskWithRows();
+    const closed = record(await svc.update({ id: owner.id, userId, expectedVersion: owner.version, data: { closed: true } }));
+    return { owner: closed, a, b };
+  }
+
+  test('batch new and delete ops on a readonly owned field fail with readonly and row; change ops pass', async () => {
+    const { owner, a, b } = await closedTask();
+    const res = await svc.update({ id: owner.id, userId, expectedVersion: owner.version, rows: { expenses: [
+      { id: a.id, version: a.version, data: { amount: 11 } }, expense({ amount: 1 }), { id: b.id, delete: true },
+    ] } });
+    expect(res).toMatchObject({ ok: false, errors: [
+      expect.objectContaining({ ...frozen, row: { field: 'expenses', index: 1 } }),
+      expect.objectContaining({ ...frozen, row: { field: 'expenses', index: 2 } }),
+    ] });
+    expect(res.ok === false && res.errors).toHaveLength(2);
+    expect(await must(owner.id)).toEqual(owner);
+    expect(await must(a.id)).toEqual(a);
+    expect(await must(b.id)).toEqual(b);
+
+    const changed = record(await svc.update({ id: owner.id, userId, expectedVersion: owner.version, rows: { expenses: [
+      { id: a.id, version: a.version, data: { amount: 11 } },
+    ] } }));
+    expect(changed.data).toMatchObject({ expenses_total: 16 });
+    expect(changed.links.expenses).toEqual([a.id, b.id]);
+  });
+
+  test('judged by the owner\'s stored state: reopening and adding in one save is rejected, closing and adding is not', async () => {
+    const { owner } = await closedTask();
+    const reopen = await svc.update({ id: owner.id, userId, expectedVersion: owner.version, data: { closed: false },
+      rows: { expenses: [expense({ amount: 1 })] } });
+    expect(reopen).toMatchObject({ ok: false, errors: [expect.objectContaining({ ...frozen, row: { field: 'expenses', index: 0 } })] });
+
+    const open = await taskWithRows();
+    const closing = record(await svc.update({ id: open.owner.id, userId, expectedVersion: open.owner.version, data: { closed: true },
+      rows: { expenses: [expense({ amount: 1 })] } }));
+    expect(closing.links.expenses).toHaveLength(3);
+  });
+
+  test('create is not checked: a closed task can be created with rows', async () => {
+    const r = record(await svc.create({ userId, title: 'T', sets: ['task'], data: { closed: true, rate: 1 }, rows: { expenses: [
+      expense({ amount: 1 }),
+    ] } }));
+    expect(r.links.expenses).toHaveLength(1);
+  });
+
+  test('PUT links excluding a row of a readonly owned field → readonly; the row stays', async () => {
+    const { owner, a, b } = await closedTask();
+    const res = await svc.setLinks({ id: owner.id, userId, field: 'expenses', targetIds: [b.id] });
+    expect(res).toMatchObject({ ok: false, errors: [expect.objectContaining(frozen)] });
+    expect(await must(a.id)).toEqual(a);
+    expect(await must(owner.id)).toEqual(owner);
+  });
+
+  test('direct archive of a row of a readonly owned field → readonly; archiving the owner is allowed', async () => {
+    const { owner, a, b } = await closedTask();
+    const res = await svc.archive({ id: a.id, userId });
+    expect(res).toEqual({ ok: false, errors: [expect.objectContaining(frozen)] });
+    expect(res.ok === false && res.errors[0]!.row).toBeUndefined();
+    expect(await must(a.id)).toEqual(a);
+    expect(await must(owner.id)).toEqual(owner);
+
+    record(await svc.archive({ id: owner.id, userId }));
+    expect((await must(a.id)).archivedAt).not.toBeNull();
+    expect((await must(b.id)).archivedAt).not.toBeNull();
+  });
+
+  test('a direct PATCH of a row of a readonly owned field follows the row\'s own rules', async () => {
+    const { owner, a } = await closedTask();
+    const res = record(await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { amount: 12 } }));
+    expect(res.data).toMatchObject({ amount: 12 });
+    expect((await must(owner.id)).data).toMatchObject({ expenses_total: 17 });
+  });
+
+  test('a direct PATCH of a live row must keep a target set → link_target on the owner field', async () => {
+    const { b } = await taskWithRows();
+    const res = await svc.update({ id: b.id, userId, expectedVersion: b.version, disableSets: ['expense'] });
+    expect(res).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'link_target', field: 'expenses' })] });
+    expect(res.ok === false && res.errors[0]!.row).toBeUndefined();
+    expect(await must(b.id)).toEqual(b);
+
+    // a standalone record is not a row: no target sets to keep
+    const standalone = record(await svc.create({ userId, title: 'Сам по себе', sets: ['expense', 'memo'], data: { amount: 1 } }));
+    const off = record(await svc.update({ id: standalone.id, userId, expectedVersion: standalone.version, disableSets: ['expense'] }));
+    expect(off.sets.map((s) => s.key)).toEqual(['memo']);
+  });
+
+  test('a direct PATCH of a live row updates the owner\'s totals, version and log through the cascade', async () => {
+    const { owner, a } = await taskWithRows();
+    record(await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { amount: 11 } }));
+    const after = await must(owner.id);
+    expect(after.data).toMatchObject({ expenses_total: 16, transport_total: 11 });
+    expect(after.version).toBe(owner.version + 1);
+    const totals = (await changeLog(owner.id)).filter((e) => e.kind === 'value' && e.field_key === 'expenses_total').at(-1);
+    expect(totals).toMatchObject({ old: 15, new: 16, source: 'cascade', user_id: userId });
+  });
+});

@@ -37,8 +37,9 @@ fields:
     inverse_label: Бюджет
   memo: {type: text, label: Памятка}
   task_note: {type: text, label: Обоснование расходов}
+  closed: {type: bool, label: Закрыта}
 sets:
-  task: {label: Задача, fields: [title, rate, expenses, primary_expense, expenses_total, transport_total, task_note]}
+  task: {label: Задача, fields: [title, rate, expenses, primary_expense, expenses_total, transport_total, task_note, closed]}
   expense: {label: Расход, fields: [expense_kind, amount, note, task_rate, cost]}
   expense_transport:
     label: Транспортный расход
@@ -62,3 +63,7 @@ rules:
   - id: big_total_needs_note
     when: '{expenses_total} > 5000'
     require: [task_note]
+  # Readonly on an owned field freezes its membership (judged by the owner's stored state).
+  - id: closed_task_frozen
+    when: '{closed}'
+    readonly: [expenses]

@@ -16,7 +16,7 @@ import {
 import { archived, notFound, recordError, SaveFailed, versionConflict } from './errors.js';
 import { fieldInEnabledSet, sameValue } from './fields.js';
 import { withRetry } from './retry.js';
-import { noRows, saveRows, type RowOp, type RowSteps } from './rows.js';
+import { noRows, requireTargetSet, saveRows, type RowOp, type RowSteps } from './rows.js';
 
 export interface RecordView {
   id: string;
@@ -147,7 +147,9 @@ export class RecordService {
       const inserted = await this.insertIn(tx, i);
       const batch = i.rows === undefined
         ? noRows()
-        : await saveRows(this.rowSteps(), tx, { id: inserted.id, userId: i.userId, sets: inserted.sets }, i.rows);
+        : await saveRows(this.rowSteps(), tx, {
+          id: inserted.id, userId: i.userId, sets: inserted.sets, prev: null,
+        }, i.rows);
       const { seed } = await this.finishCreateIn(tx, i.userId, inserted, batch.changedLinks);
       await this.cascade(tx, i.userId, [...batch.seeds, seed], batch.budget);
       return this.reload(tx, inserted.id);
@@ -158,6 +160,9 @@ export class RecordService {
    * Updates a record. With `rows` the owner is locked and its input checked first, then its rows are saved
    * (`saveRows`), then the owner is evaluated (its rollups see the rows) and written; one cascade over the
    * rows and the owner follows, which also refreshes the rows' rollups over the owner.
+   *
+   * A row (spec §1.12) must keep one of the `target_sets` of its owned field (`link_target`, with that
+   * field), as a change op of its owner's batch must.
    */
   update(i: UpdateInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
@@ -165,8 +170,12 @@ export class RecordService {
       const prepared = this.prepareUpdate(i, stored);
       const batch = i.rows === undefined
         ? noRows()
-        : await saveRows(this.rowSteps(), tx, { id: i.id, userId: i.userId, sets: prepared.sets }, i.rows);
-      const { seed } = await this.finishUpdateIn(tx, i, stored, prepared, batch.changedLinks);
+        : await saveRows(this.rowSteps(), tx, {
+          id: i.id, userId: i.userId, sets: prepared.sets, prev: prepared.prev,
+        }, i.rows);
+      const { seed, sets } = await this.finishUpdateIn(tx, i, stored, prepared, batch.changedLinks);
+      // A live row keeps one of its field's target sets (spec §1.12), as in its owner's batch.
+      if (stored.ownerField !== null) requireTargetSet(this.cfg, stored.ownerField, sets);
       await this.cascade(tx, i.userId, [...batch.seeds, seed], batch.budget);
       return this.reload(tx, i.id);
     });
@@ -220,7 +229,9 @@ export class RecordService {
    * against the cascade limit); links stay. Archiving a row deletes it: it also leaves its owner's owned
    * link, and the owner is re-evaluated and written (version bump, `link` entry). To keep the lock order of
    * a batch (owner before rows), the owner of a row is locked before the row: the row's `owner_id` is read
-   * unlocked first (it never changes after insert). A row whose owner is archived is `archived`.
+   * unlocked first (it never changes after insert). A row whose owner is archived is `archived`; a row of
+   * an owned field the owner's rules make `readonly` (judged by the owner's stored state) is `readonly`.
+   * Archiving the owner itself is always allowed.
    */
   archive(i: ArchiveInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
@@ -231,6 +242,11 @@ export class RecordService {
         : (await loadRecords(tx, [ownerId], { forUpdate: true, workspaceId: this.workspaceId })).get(ownerId);
       const stored = await this.lockEditable(tx, i.id);
       if (owner !== undefined && owner.archivedAt !== null) throw new SaveFailed([archived(i.id)]);
+      if (owner !== undefined && stored.ownerField !== null) {
+        // A readonly owned field (judged by the owner's stored state) freezes its membership.
+        const readonly = readonlyErrors(this.cfg, stateOf(owner), new Set([stored.ownerField]), this.now());
+        if (readonly.length > 0) throw new SaveFailed(readonly);
+      }
 
       const budget: CascadeBudget = { spent: 0 };
       const seeds = await this.archiveIn(tx, stored, i.userId, budget);
@@ -452,6 +468,7 @@ export class RecordService {
     return {
       cfg: this.cfg,
       workspaceId: this.workspaceId,
+      now: () => this.now(),
       insertIn: (tx, i, owner) => this.insertIn(tx, i, owner),
       finishCreateIn: (tx, userId, inserted) => this.finishCreateIn(tx, userId, inserted, []),
       updateIn: (tx, i, stored) => this.updateIn(tx, i, stored),

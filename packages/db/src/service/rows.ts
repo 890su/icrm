@@ -1,4 +1,6 @@
-import { ownedFieldsOf, type CompiledConfig, type RecordError, type Value } from '@icrm/core';
+import {
+  ownedFieldsOf, readonlyErrors, type CompiledConfig, type RecordError, type RecordState, type Value,
+} from '@icrm/core';
 import { linksFrom } from '../repo/links.js';
 import { loadRecords, type StoredRecord } from '../repo/records.js';
 import type { Db } from '../repo/types.js';
@@ -40,6 +42,7 @@ type LinkChange = CascadeSeed['changedLinks'][number];
 export interface RowSteps {
   cfg: CompiledConfig;
   workspaceId: string;
+  now(): Date;
   /** Validates and inserts a new row (version 0) owned by `owner`; not evaluated yet. */
   insertIn(tx: Db, i: CreateInput, owner: { id: string; field: string }): Promise<Inserted>;
   /** Evaluates and writes a row `insertIn` inserted. */
@@ -60,6 +63,8 @@ export interface RowOwner {
   userId: string;
   /** The owner's sets before its evaluation: stored ones plus `sets`/`enableSets` of this save. */
   sets: Map<string, string>;
+  /** The owner's stored state (null on create): `readonly` on an owned field is judged by it. */
+  prev: RecordState | null;
 }
 
 /**
@@ -75,6 +80,18 @@ export interface RowsResult {
 /** The result of a save without `rows`; a fresh object each time, as the owner's seed takes its arrays over. */
 export const noRows = (): RowsResult => ({ seeds: [], changedLinks: [], budget: { spent: 0 } });
 
+/**
+ * Throws `link_target` (with `field`) unless `sets` (a live row's sets after its save) contain one of the
+ * `target_sets` of its owned field `field`: a row must stay a valid target of its owner's link (spec §1.12).
+ */
+export function requireTargetSet(cfg: CompiledConfig, field: string, sets: Map<string, string>): void {
+  const def = cfg.fields.get(field)!;
+  const wanted = def.target_sets ?? [];
+  if (wanted.some((s) => sets.has(s))) return;
+  const names = wanted.map((s) => `«${cfg.sets.get(s)?.label ?? s}»`).join(', ');
+  throw new SaveFailed([recordError('link_target', `Поле «${def.label}»: у строки нет набора ${names}`, { field })]);
+}
+
 const isDelete = (op: RowOp): op is DeleteRowOp => 'delete' in op && op.delete === true;
 const isChange = (op: RowOp): op is ChangeRowOp => 'id' in op && !isDelete(op);
 
@@ -89,7 +106,9 @@ const isChange = (op: RowOp): op is ChangeRowOp => 'id' in op && !isDelete(op);
  *    `loadRecords(..., {forUpdate: true, workspaceId})` (id order); records of other workspaces are never
  *    locked (they are `link_owned` below). A row named twice is a `validation` error of the later op.
  * 3. Per field, in batch order: `cardinality: one` with more than one row afterwards is `link_cardinality`
- *    (with `field`). A change or delete op must name a row of this owner and field (`link_owned`, with
+ *    (with `field`). When a rule makes the field `readonly` in the owner's stored state (`prev`; never on
+ *    create), its membership is frozen: every new and delete op is `readonly` (and is not run); change ops
+ *    follow the row's own rules. A change or delete op must name a row of this owner and field (`link_owned`, with
  *    `field`) that is not archived (`archived`: a deleted row stays the owner's, so re-sending a batch that
  *    deleted it fails here). A change op must be at its version (`version_conflict`) and goes through
  *    `updateIn`. A delete op archives the row and its own rows recursively (`archiveIn`). A new op is
@@ -136,13 +155,6 @@ export async function saveRows(
       return null;
     }
   };
-  const requireTargetSet = (field: string, sets: Map<string, string>): void => {
-    const def = cfg.fields.get(field)!;
-    const wanted = def.target_sets ?? [];
-    if (wanted.some((s) => sets.has(s))) return;
-    const names = wanted.map((s) => `«${cfg.sets.get(s)?.label ?? s}»`).join(', ');
-    throw new SaveFailed([recordError('link_target', `Поле «${def.label}»: у строки нет набора ${names}`, { field })]);
-  };
 
   const named = new Set<string>();
   for (const field of fields) {
@@ -181,10 +193,16 @@ export async function saveRows(
     if (def.cardinality === 'one' && before.length - dropped.size + added > 1) {
       fieldErrors.set(field, [recordError('link_cardinality', `Поле «${def.label}» допускает только одну связь`, { field })]);
     }
+    // A readonly owned field (judged by the owner's stored state) freezes membership: no new or delete ops.
+    const frozen = owner.prev === null ? [] : readonlyErrors(cfg, owner.prev, new Set([field]), steps.now());
     const newIds: string[] = [];
     const deleted = new Set<string>();
     for (const [index, op] of ops.entries()) {
       if (opErrors.has(opKey(field, index))) continue; // a row named twice
+      if (frozen.length > 0 && !isChange(op)) {
+        fail(field, index, frozen);
+        continue;
+      }
       if (isDelete(op)) {
         await attempt(field, index, async () => {
           const stored = ownRow(field, op.id);
@@ -199,7 +217,7 @@ export async function saveRows(
             id: op.id, userId: owner.userId, expectedVersion: op.version, title: op.title, data: op.data,
             enableSets: op.enableSets, disableSets: op.disableSets,
           }, stored);
-          requireTargetSet(field, sets);
+          requireTargetSet(cfg, field, sets);
           seeds.push(seed);
         });
       } else {
@@ -223,7 +241,7 @@ export async function saveRows(
   for (const { field, index, row } of inserted) {
     await attempt(field, index, async () => {
       const { seed, sets } = await steps.finishCreateIn(tx, owner.userId, row);
-      requireTargetSet(field, sets);
+      requireTargetSet(cfg, field, sets);
       seeds.push(seed);
     });
   }
