@@ -35,12 +35,13 @@ TypeScript monorepo (pnpm workspaces): `packages/core` (чистая домен�
 
 ## Current state
 
-Подпроект 1 «Ядро записей» реализован (ветка `feat/core-records`): `packages/core`,
-`packages/db`, `apps/server` (минимальный API `/meta`, `/records`, `/query`); стартовый
-конфиг в `config/`. Запуск и переменные окружения — `README.md`.
-Подпроект 1b «Строки записи (аналитики)» реализован (ветка `feat/record-rows`): владеемые
-связи (`owned: true`), пакет `rows` в `POST`/`PATCH /records`, `includeRows` в `/query`; пример —
-`config/finance.yaml`. Дальше: подпроект 2 «Контакты и организации».
+Подпроекты 1 «Ядро записей» и 1b «Строки записи (аналитики)» реализованы и слиты в `main`:
+`packages/core`, `packages/db`, `apps/server` (минимальный API `/meta`, `/records`, `/query`);
+владеемые связи (`owned: true`), пакет `rows`, `includeRows`; стартовый конфиг в `config/`.
+Запуск и переменные окружения — `README.md`.
+Дальше: подпроект 2a «Контакты и организации: основа» (спецификация
+`docs/superpowers/specs/2026-10-31-contacts-organizations-design.md`, план
+`docs/superpowers/plans/2026-10-31-contacts-core.md`), затем 2b.
 Архитектурная спецификация: `docs/superpowers/specs/2026-10-30-icrm-architecture-design.md`.
 
 ## Sub-projects
