@@ -244,6 +244,10 @@ describe('rows', () => {
 
     // GET shows the same rows
     expect((await get(`/records/${c.json().id}`)).json().rows.expenses.map((r: RowRef) => r.id)).toEqual([rowId]);
+    // a row points back at its owner; the owner points nowhere
+    expect(c.json()).toMatchObject({ ownerId: null, ownerField: null });
+    expect(c.json().rows.expenses[0]).toMatchObject({ ownerId: c.json().id, ownerField: 'expenses' });
+    expect((await get(`/records/${rowId}`)).json()).toMatchObject({ ownerId: c.json().id, ownerField: 'expenses' });
 
     // change one row and add another in one batch
     const ch = await patch(`/records/${c.json().id}`, {

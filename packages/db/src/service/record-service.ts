@@ -32,6 +32,9 @@ export interface RecordView {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  /** The owner of a row (spec §1.12) and its owned field; both null for a record that is not a row. */
+  ownerId: string | null;
+  ownerField: string | null;
   /**
    * The non-archived rows (spec §1.12) per owned link field of the enabled sets, in link order. Present on
    * `get` and on the result of a save, only for a record with at least one owned field among its enabled sets
@@ -721,6 +724,8 @@ export class RecordService {
       createdAt: rec.createdAt.toISOString(),
       updatedAt: rec.updatedAt.toISOString(),
       archivedAt: rec.archivedAt?.toISOString() ?? null,
+      ownerId: rec.ownerId,
+      ownerField: rec.ownerField,
     };
     if (withRows) {
       const rows = await this.rowsOf(tx, rec, links);
@@ -729,7 +734,10 @@ export class RecordService {
     return view;
   }
 
-  /** Views of the live rows of every owned field of `rec`'s enabled sets, loaded with one query; undefined without owned fields. */
+  /**
+   * Views of the live rows of every owned field of `rec`'s enabled sets, loaded with one query; undefined
+   * without owned fields. Only targets owned by `rec` through that very field count as its rows.
+   */
   private async rowsOf(tx: Db, rec: StoredRecord, links: Record<string, string[]>): Promise<Record<string, RowView[]> | undefined> {
     const fields = ownedFieldsOf(this.cfg, rec.sets.keys());
     if (fields.length === 0) return undefined;
@@ -739,7 +747,8 @@ export class RecordService {
       rows[field] = [];
       for (const id of links[field] ?? []) {
         const row = loaded.get(id);
-        if (row !== undefined && row.archivedAt === null) rows[field].push(await this.view(tx, row, false));
+        if (row === undefined || row.archivedAt !== null || row.ownerId !== rec.id || row.ownerField !== field) continue;
+        rows[field].push(await this.view(tx, row, false));
       }
     }
     return rows;

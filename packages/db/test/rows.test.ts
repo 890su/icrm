@@ -3,7 +3,9 @@ import { loadConfigDir } from '@icrm/core/node';
 import type { CompiledConfig, Value } from '@icrm/core';
 import { sql, type Kysely } from 'kysely';
 import { beforeAll, describe, expect, test } from 'vitest';
-import { ensureWorkspace, queryRecords, RecordService, type DB, type RecordView, type SaveResult } from '../src/index.js';
+import {
+  ensureWorkspace, queryRecords, RecordService, replaceLinks, type DB, type RecordView, type SaveResult,
+} from '../src/index.js';
 import { freshDb } from './setup-pg.js';
 
 const CONFIG_DIR = fileURLToPath(new URL('./fixtures/rows/', import.meta.url));
@@ -540,6 +542,29 @@ describe('rows in reads', () => {
     const row = (await svc.get(a.id))!;
     expect(row.rows!.budget_lines!.map((r) => r.id)).toEqual(a.links.budget_lines);
     expect(row.rows!.budget_lines![0]).not.toHaveProperty('rows');
+  });
+
+  test('views expose ownerId and ownerField: set on rows, null otherwise', async () => {
+    const { owner, a, b } = await markedRows('rd-owner');
+    expect(owner).toMatchObject({ ownerId: null, ownerField: null });
+    expect(await must(b)).toMatchObject({ ownerId: owner.id, ownerField: 'expenses' });
+    expect(owner.rows!.expenses!.map((r) => [r.ownerId, r.ownerField])).toEqual([[owner.id, 'expenses'], [owner.id, 'expenses']]);
+    expect(a.rows!.budget_lines![0]).toMatchObject({ ownerId: a.id, ownerField: 'budget_lines' });
+  });
+
+  test('rows lists only records owned through that field (a link stored without ownership is not a row)', async () => {
+    const { owner, a } = await taskWithRows();
+    const standalone = record(await svc.create({ userId, title: 'Сам по себе', sets: ['expense'], data: { amount: 1 } }));
+    // As if `owned` had been switched on for a field with existing links: a standalone target, and a row of
+    // this owner under another field, linked under `expenses` behind the real rows.
+    const primary = record(await svc.update({ id: owner.id, userId, expectedVersion: owner.version,
+      rows: { primary_expense: [expense({ amount: 2 })] } })).links.primary_expense![0]!;
+    await replaceLinks(db, workspaceId, owner.id, 'expenses', [...owner.links.expenses!, standalone.id, primary]);
+    const v = await must(owner.id);
+    expect(v.links.expenses).toEqual([...owner.links.expenses!, standalone.id, primary]);
+    expect(v.rows!.expenses!.map((r) => r.id)).toEqual(owner.links.expenses);
+    expect(v.rows!.expenses![0]!.id).toBe(a.id);
+    expect(v.rows!.primary_expense!.map((r) => r.id)).toEqual([primary]);
   });
 
   test('a save result carries rows; a record without owned fields has no rows key', async () => {
