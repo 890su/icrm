@@ -151,6 +151,22 @@ export function compileConfig(raw: RawConfig): CompiledConfig {
     }
   }
 
+  // --- renames ------------------------------------------------------------------------------
+  // `was` moves stored data from the old key (spec §1.11), so the old key must be gone from the config
+  // and belong to one field only; anything else would silently move live data.
+  const wasOwner = new Map<string, FieldDef>();
+  for (const d of defs.values()) {
+    if (d.was === undefined) continue;
+    const first = wasOwner.get(d.was);
+    if (defs.has(d.was)) {
+      report(d.src, 'was', `поле "${d.was}" есть в конфиге; was указывает только ключ, которого больше нет`);
+    } else if (first !== undefined) {
+      report(d.src, 'was', `was: "${d.was}" уже указан у ${first.src.path}`);
+    } else {
+      wasOwner.set(d.was, d);
+    }
+  }
+
   // --- expressions and types -----------------------------------------------------------------
   const asts = new Map<string, Expr>();
   const filterAsts = new Map<string, Expr>();

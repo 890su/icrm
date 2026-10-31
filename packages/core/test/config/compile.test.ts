@@ -207,3 +207,29 @@ ${SET_T}`);
     expect(issues[0]!.path).toBe('fields.x.expr');
   });
 });
+
+describe('was (renames)', () => {
+  test('a rename from a key that is gone compiles', () => {
+    expect(compile(`fields: {work_hours: {type: number, label: H, was: hours}}`).fields.get('work_hours')!.was).toBe('hours');
+  });
+
+  test('was equal to a live field key is an issue at the field, with its line', () => {
+    const issues = compileIssues(`fields:
+  hours: {type: number, label: H}
+  work_hours: {type: number, label: WH, was: hours}
+  t2: {type: text, label: T, was: title}
+  self: {type: text, label: S, was: self}`);
+    expect(issues.map((i) => [i.path, i.line])).toEqual([
+      ['fields.work_hours.was', 3], ['fields.t2.was', 4], ['fields.self.was', 5],
+    ]);
+    expect(issues[0]!.message).toContain('"hours"');
+    expect(issues.every((i) => i.file === 't.yaml')).toBe(true);
+  });
+
+  test('the same was on two fields is an issue at the second one', () => {
+    const issues = compileIssues(`fields:
+  a: {type: number, label: A, was: old}
+  b: {type: number, label: B, was: old}`);
+    expect(issues).toEqual([expect.objectContaining({ path: 'fields.b.was', line: 3, message: expect.stringContaining('fields.a') })]);
+  });
+});
