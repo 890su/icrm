@@ -1,3 +1,4 @@
+import { isSupportedCountry } from 'libphonenumber-js/min';
 import { z } from 'zod';
 
 export type FieldType =
@@ -160,6 +161,15 @@ const timezone = z.string().refine(
   { message: 'unknown IANA time zone' },
 );
 
+const REGION_RE = /^[A-Z]{2}$/;
+
+/** A country code libphonenumber knows, so national numbers can be read in it. */
+const phoneRegion = z.string()
+  .regex(REGION_RE, { message: 'ожидается код страны из двух заглавных букв, например PL' })
+  .superRefine((v, ctx) => {
+    if (REGION_RE.test(v) && !isSupportedCountry(v)) ctx.addIssue({ code: 'custom', message: `неизвестный код страны "${v}"` });
+  });
+
 const extend = z.strictObject({
   sets: z.record(z.string(), z.strictObject({ fields: strList })).optional(),
   fields: z.record(z.string(), z.strictObject({
@@ -172,7 +182,7 @@ const extend = z.strictObject({
 export const fileSchema = z.strictObject({
   workspace: z.strictObject({
     timezone: timezone.optional(),
-    phone_region: z.string().regex(/^[A-Z]{2}$/, { message: 'ожидается код страны из двух заглавных букв, например PL' }).optional(),
+    phone_region: phoneRegion.optional(),
   }).optional(),
   fields: z.record(z.string(), field).optional(),
   sets: z.record(z.string(), set).optional(),

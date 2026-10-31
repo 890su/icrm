@@ -77,6 +77,10 @@ rules: [{id: r, when: '1 = 1', options: {role: [a]}}]`)))
     expect(build('').phoneRegion).toBe('PL');
     expect(build('workspace: {phone_region: DE}').phoneRegion).toBe('DE');
     expect(issuesOf(() => build('workspace: {phone_region: pl}'))).toContainEqual(expect.objectContaining({ path: 'workspace.phone_region' }));
+    for (const code of ['UK', 'ZZ']) {
+      expect(issuesOf(() => build(`workspace: {phone_region: ${code}}`)))
+        .toContainEqual(expect.objectContaining({ path: 'workspace.phone_region', message: `неизвестный код страны "${code}"` }));
+    }
   });
 
   test('a file named <system> among user files is rejected', () => {
