@@ -163,3 +163,19 @@ test('contact and organization views list memberships', async () => {
   expect((await rec.get(jan.id))!.memberships!.map((m) => m.id)).toEqual([janV.id]);
   expect((await rec.get(firmaV.id))!.links).not.toHaveProperty('memberships');
 });
+
+test('two concurrent memberships of one contact and organization: one wins, one live membership remains', async () => {
+  const c = await person('Race C'); const o = await firm('Firma Race');
+  const res = await Promise.all([rawMembership(c, o), rawMembership(c, o)]);
+  expect(res.filter((r) => r.ok)).toHaveLength(1);
+  expect(res.find((r) => !r.ok)).toEqual({ ok: false, errors: [expect.objectContaining({ code: 'membership_active_exists' })] });
+  expect((await rec.get(c.id))!.memberships).toHaveLength(1);
+});
+
+test('two concurrent primary memberships of one contact: one wins, the other is primary_conflict', async () => {
+  const c = await person('Race P'); const o1 = await firm('Firma RP1'); const o2 = await firm('Firma RP2');
+  const res = await Promise.all([rawMembership(c, o1, { is_primary: true }), rawMembership(c, o2, { is_primary: true })]);
+  expect(res.filter((r) => r.ok)).toHaveLength(1);
+  expect(res.find((r) => !r.ok)).toEqual({ ok: false, errors: [expect.objectContaining({ code: 'primary_conflict' })] });
+  expect((await rec.get(c.id))!.memberships!.filter((m) => m.isPrimary)).toHaveLength(1);
+});
