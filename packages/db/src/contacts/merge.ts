@@ -211,10 +211,21 @@ export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
     }
     const today = todayIn(d.now(), d.cfg.timezone);
 
-    // 0. The manual sets of A that B lacks, first: links to A and own links of A may need them on B.
+    // 0. The manual sets of A that B lacks, first: links to A and own links of A may need them on B. They come
+    // with A's values of the fields only those sets have (not in any set of B, so never the NIP or another
+    // field of B's kind), so that their rules (`require` of such a field) pass; the rest of the values waits
+    // for step 9. A `require` of a link field of such a set still fails here, before the links move.
     const enableSets = [...a.sets].filter(([key, by]) => by === MANUAL && !b.sets.has(key)).map(([key]) => key);
+    const early = new Set<string>();
     if (enableSets.length > 0) {
-      await ops.update({ id: b.id, userId: i.userId, expectedVersion: b.version, enableSets });
+      const gained = new Set(enableSets.flatMap((k) => d.cfg.sets.get(k)?.closure ?? [k]).filter((k) => !b.sets.has(k)));
+      const data: Record<string, Value> = {};
+      for (const key of valueFields(d.cfg, gained)) {
+        if (fieldInEnabledSet(d.cfg, b.sets, key) || isEmpty(a.data[key])) continue;
+        data[key] = a.data[key]!;
+        early.add(key);
+      }
+      await ops.update({ id: b.id, userId: i.userId, expectedVersion: b.version, enableSets, data });
     }
 
     // 1. Addresses.
@@ -274,6 +285,7 @@ export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
     const bNow = (await loadRecords(tx, [b.id], { workspaceId: d.workspaceId, forUpdate: true })).get(b.id)!;
     const data: Record<string, Value> = {};
     for (const key of valueFields(d.cfg, a.sets.keys())) {
+      if (early.has(key)) continue;
       const [sv, tv] = [a.data[key], bNow.data[key]];
       if (isEmpty(sv) || sameValue(sv, tv)) continue;
       if (isEmpty(tv) || choice[key] === 'source') data[key] = sv!;

@@ -186,6 +186,18 @@ test('a manual set of A that B lacks is enabled on B before links to A move', as
   expect((await get(gift.id)).links.sponsor).toEqual([b.id]);
 });
 
+test('a set of A that requires its own field is enabled on B with the value of A', async () => {
+  const a = await create('Req A', ['contact', 'vip'], { vip_level: 5, notes: 'A notes' });
+  const b = await create('Req B', ['contact'], { notes: 'B notes' });
+  const r = await cs.merge({ sourceId: a.id, targetId: b.id, userId });
+  expect(r.ok, JSON.stringify(r)).toBe(true);
+  expect(r.ok && r.record.sets.map((s) => s.key)).toEqual(['contact', 'vip']);
+  expect(r.ok && r.record.data).toMatchObject({ vip_level: 5, notes: 'B notes' });
+  const log = await db.selectFrom('change_log').select('field_key').where('record_id', '=', b.id)
+    .where('kind', '=', 'value').where('field_key', '=', 'vip_level').execute();
+  expect(log).toHaveLength(1);
+});
+
 test('organizations with the same NIP merge; memberships move to B', async () => {
   const a = await create('Firma NIP', ['organization'], { nip: '525-000-00-09', org_kind: 'фирма' });
   const b = await create('Firma NIP sp. z o.o.', ['organization'], { nip: '5260000011' });

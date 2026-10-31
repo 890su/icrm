@@ -19,6 +19,10 @@ extend:
   sets:
     contact: {fields: [devices, friends, referrer]}
 rules:
+  # A merge enables the set on B together with A's values of its own fields, or this would fail.
+  - id: vip_level_required
+    when: 'HAS_SET("vip")'
+    require: [vip_level]
   - id: locked_account_frozen
     when: '{locked}'
     readonly: [user_of]
