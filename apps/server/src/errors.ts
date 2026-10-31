@@ -1,5 +1,5 @@
 import type { RecordError } from '@icrm/core';
-import { QueryError, type SaveResult } from '@icrm/db';
+import { isRetryable, QueryError, type SaveResult } from '@icrm/db';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { ZodError } from 'zod';
 
@@ -22,10 +22,6 @@ export const notFoundBody = (message: string): ErrorBody => oneError('not_found'
 export function sendSaved(reply: FastifyReply, res: SaveResult, okStatus: number): FastifyReply {
   return res.ok ? reply.code(okStatus).send(res.record) : reply.code(statusOf(res.errors)).send({ errors: res.errors });
 }
-
-/** Postgres deadlock_detected / serialization_failure: the transaction was rolled back, a retry may succeed. */
-const isRetryable = (e: unknown): boolean =>
-  typeof e === 'object' && e !== null && 'code' in e && (e.code === '40P01' || e.code === '40001');
 
 /**
  * Postgres class 22 (data exception): usually well-formed JSON carrying a value the database cannot store or

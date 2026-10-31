@@ -7,6 +7,7 @@ import { appendChangeLog, type ChangeEntry } from '../repo/change-log.js';
 import { linkedFields, linksFrom, linksTo } from '../repo/links.js';
 import { loadRecords, writeRecord, writeSets, type StoredRecord } from '../repo/records.js';
 import type { Db } from '../repo/types.js';
+import { fieldInEnabledSet } from './fields.js';
 
 /** Spec §1.8: at most this many record recomputations in the cascade of one save. */
 export const CASCADE_LIMIT = 10_000;
@@ -31,9 +32,6 @@ export interface RollupHolder {
   data: Record<string, Value>;
   sets: Map<string, string>;
 }
-
-const hasField = (cfg: CompiledConfig, sets: Map<string, string>, key: string): boolean =>
-  [...(cfg.setsOfField.get(key) ?? [])].some((s) => sets.has(s));
 
 /** Sets present on one side only (a relabel of an enabled set is not a change here). */
 export function changedSetKeys(before: Map<string, string>, after: Map<string, string>): Set<string> {
@@ -63,7 +61,7 @@ const newCache = (): RollupCache => ({ related: new Map(), values: new Map() });
 
 /** Keys of the rollups that belong to one of `sets`. */
 const rollupsIn = (cfg: CompiledConfig, sets: Map<string, string>): Set<string> =>
-  new Set(cfg.rollups.filter((r) => hasField(cfg, sets, r.key)).map((r) => r.key));
+  new Set(cfg.rollups.filter((r) => fieldInEnabledSet(cfg, sets, r.key)).map((r) => r.key));
 
 const sameKeys = (a: Set<string>, b: Set<string>): boolean => a.size === b.size && [...a].every((k) => b.has(k));
 
@@ -227,7 +225,7 @@ export async function runCascade(
     for (const id of [...records.keys()].sort()) {
       const rec = records.get(id)!;
       if (rec.workspaceId !== workspaceId || rec.archivedAt !== null) continue;
-      if (![...wave.get(id)!].some((key) => hasField(cfg, rec.sets, key))) continue;
+      if (![...wave.get(id)!].some((key) => fieldInEnabledSet(cfg, rec.sets, key))) continue;
       if (++recomputed > limit) return [{ code: 'validation', message: 'каскад превысил лимит' }];
       const { seed } = await recompute(tx, cfg, rec, now, workspaceId, userId);
       if (seed !== null) pending.push(seed);

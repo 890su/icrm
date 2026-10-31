@@ -12,6 +12,7 @@ export {
   RecordService, type ArchiveInput, type CreateInput, type RecomputeError, type RecordView, type SaveResult,
   type SetLinksInput, type UpdateInput,
 } from './service/record-service.js';
+export { isRetryable } from './service/retry.js';
 export {
   CASCADE_LIMIT, evaluateWithRollups, refreshOwnRollups, runCascade, type CascadeSeed, type RollupHolder,
 } from './service/cascade.js';

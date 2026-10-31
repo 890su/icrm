@@ -13,6 +13,7 @@ import {
   archiveSeeds, changedSetKeys, evaluateWithRollups, recompute, runCascade, type CascadeSeed,
 } from './cascade.js';
 import { archived, notFound, recordError, SaveFailed, versionConflict } from './errors.js';
+import { fieldInEnabledSet, sameValue } from './fields.js';
 import { withRetry } from './retry.js';
 
 export interface RecordView {
@@ -75,19 +76,6 @@ export interface UpdateInput {
 const MANUAL = 'manual';
 const RULE_PREFIX = 'rule:';
 
-/** Structural equality of stored values; a missing key equals `null`. */
-function sameValue(a: Value | undefined, b: Value | undefined): boolean {
-  const x = a ?? null;
-  const y = b ?? null;
-  if (x === y) return true;
-  if (typeof x !== 'object' || typeof y !== 'object' || x === null || y === null) return false;
-  if (Array.isArray(x) || Array.isArray(y)) {
-    return Array.isArray(x) && Array.isArray(y) && x.length === y.length && x.every((v, i) => sameValue(v, y[i]));
-  }
-  const kx = Object.keys(x) as (keyof typeof x)[];
-  return kx.length === Object.keys(y).length && kx.every((k) => Object.hasOwn(y, k) && sameValue(x[k], y[k]));
-}
-
 const stateOf = (r: StoredRecord): RecordState => ({ data: { ...r.data, title: r.title }, sets: new Map(r.sets) });
 
 /**
@@ -117,75 +105,17 @@ export class RecordService {
 
   create(i: CreateInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
-      const id = uuidv7();
-      const errors: RecordError[] = [];
-      const sets = new Map<string, string>();
-      this.enableManualSets(sets, i.sets ?? [], errors);
-      const input = this.knownInput({ ...i.data, title: i.title }, null, errors);
-      if (errors.length > 0) throw new SaveFailed(errors);
-
-      await this.lockHierarchies(tx, Object.keys(i.links ?? {}));
-      // The row goes in first (version 0) so that links can point from it; the evaluated state
-      // is written over it below, which makes it version 1.
-      await insertRecord(tx, {
-        id, workspaceId: this.workspaceId, title: i.title, data: input, sets, createdBy: i.userId, version: 0,
-      });
-      const linkInput = Object.entries(i.links ?? {});
-      for (const [field, targetIds] of linkInput) errors.push(...await this.linkErrors(tx, id, sets, field, targetIds));
-      if (errors.length > 0) throw new SaveFailed(errors);
-      const changedLinks: LinkChange[] = [];
-      for (const [field, targetIds] of linkInput) {
-        const change = await this.replaceLinksLogged(tx, id, i.userId, field, targetIds);
-        if (change !== null) changedLinks.push(change);
-      }
-
-      const userChangedKeys = new Set(Object.keys(input));
-      const next: RecordState = { data: input, sets: new Map(sets) };
-      const res = await this.evaluate(tx, id, null, next, userChangedKeys);
-
-      const inserted = (await loadRecords(tx, [id])).get(id)!;
-      if (!(await writeRecord(tx, { ...inserted, title: titleOf(res.state), data: res.state.data }, 0))) {
-        throw new Error(`record ${id} changed inside its own create`);
-      }
-      await writeSets(tx, id, sets, res.state.sets);
-      await appendChangeLog(tx, this.changeEntries(id, i.userId, null, res, userChangedKeys));
-      await this.cascade(tx, i.userId, [{
-        recordId: id, changedKeys: res.changedKeys, changedSets: new Set(res.state.sets.keys()), changedLinks,
-      }]);
+      const { id, seed } = await this.createIn(tx, i);
+      await this.cascade(tx, i.userId, [seed]);
       return this.reload(tx, id);
     });
   }
 
   update(i: UpdateInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
-      const stored = (await loadRecords(tx, [i.id], { forUpdate: true })).get(i.id);
-      if (stored === undefined || stored.workspaceId !== this.workspaceId) throw new SaveFailed([notFound(i.id)]);
-      if (stored.version !== i.expectedVersion) throw new SaveFailed([versionConflict(i.id)]);
-      if (stored.archivedAt !== null) throw new SaveFailed([archived(i.id)]);
-
-      const prev = stateOf(stored);
-      const errors: RecordError[] = [];
-      const sets = new Map(prev.sets);
-      this.enableManualSets(sets, i.enableSets ?? [], errors);
-      this.disableManualSets(sets, i.disableSets ?? [], errors);
-      const raw = i.title === undefined ? { ...i.data } : { ...i.data, title: i.title };
-      const input = this.knownInput(raw, prev, errors);
-      if (errors.length > 0) throw new SaveFailed(errors);
-
-      const userChangedKeys = new Set(Object.keys(input).filter((k) => !sameValue(prev.data[k], input[k])));
-      const next: RecordState = { data: { ...prev.data, ...input }, sets };
-      const res = await this.evaluate(tx, i.id, prev, next, userChangedKeys);
-
-      const written = await writeRecord(
-        tx, { ...stored, title: titleOf(res.state), data: res.state.data }, i.expectedVersion,
-      );
-      if (!written) throw new SaveFailed([versionConflict(i.id)]);
-      await writeSets(tx, i.id, stored.sets, res.state.sets);
-      await appendChangeLog(tx, this.changeEntries(i.id, i.userId, prev, res, userChangedKeys));
-      await this.cascade(tx, i.userId, [{
-        recordId: i.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
-        changedLinks: [],
-      }]);
+      const stored = await this.lockEditable(tx, i.id, i.expectedVersion);
+      const { seed } = await this.updateIn(tx, i, stored);
+      await this.cascade(tx, i.userId, [seed]);
       return this.reload(tx, i.id);
     });
   }
@@ -213,10 +143,7 @@ export class RecordService {
       const next: RecordState = { data: { ...prev.data }, sets: new Map(prev.sets) };
       const userChangedKeys = new Set<string>();
       const res = await this.evaluate(tx, i.id, prev, next, userChangedKeys);
-      const written = await writeRecord(tx, { ...stored, title: titleOf(res.state), data: res.state.data }, stored.version);
-      if (!written) throw new SaveFailed([versionConflict(i.id)]);
-      await writeSets(tx, i.id, stored.sets, res.state.sets);
-      await appendChangeLog(tx, this.changeEntries(i.id, i.userId, prev, res, userChangedKeys));
+      await this.persist(tx, stored, prev, res, i.userId, userChangedKeys, stored.version);
       await this.cascade(tx, i.userId, [{
         recordId: i.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
         changedLinks: [change],
@@ -288,12 +215,96 @@ export class RecordService {
     }
   }
 
-  /** Locks the record for a save: it must exist in this workspace and not be archived. */
-  private async lockEditable(tx: Db, id: string): Promise<StoredRecord> {
+  /**
+   * Locks the record for a save: it must exist in this workspace (`not_found`), have `expectedVersion` when
+   * one is given (`version_conflict`) and not be archived (`archived`). Checked in that order.
+   */
+  private async lockEditable(tx: Db, id: string, expectedVersion?: number): Promise<StoredRecord> {
     const stored = (await loadRecords(tx, [id], { forUpdate: true })).get(id);
     if (stored === undefined || stored.workspaceId !== this.workspaceId) throw new SaveFailed([notFound(id)]);
+    if (expectedVersion !== undefined && stored.version !== expectedVersion) throw new SaveFailed([versionConflict(id)]);
     if (stored.archivedAt !== null) throw new SaveFailed([archived(id)]);
     return stored;
+  }
+
+  /**
+   * The create step, inside the caller's transaction: validates the input, inserts the record (version 0),
+   * sets its links, evaluates and writes it (version 1). Does not cascade: the returned seed is for the caller
+   * to cascade once everything it saves together is written.
+   */
+  private async createIn(tx: Db, i: CreateInput): Promise<{ id: string; seed: CascadeSeed }> {
+    const id = uuidv7();
+    const errors: RecordError[] = [];
+    const sets = new Map<string, string>();
+    this.enableManualSets(sets, i.sets ?? [], errors);
+    const input = this.knownInput({ ...i.data, title: i.title }, null, errors);
+    if (errors.length > 0) throw new SaveFailed(errors);
+
+    await this.lockHierarchies(tx, Object.keys(i.links ?? {}));
+    // The row goes in first (version 0) so that links can point from it; the evaluated state
+    // is written over it below, which makes it version 1.
+    await insertRecord(tx, {
+      id, workspaceId: this.workspaceId, title: i.title, data: input, sets, createdBy: i.userId, version: 0,
+    });
+    const linkInput = Object.entries(i.links ?? {});
+    for (const [field, targetIds] of linkInput) errors.push(...await this.linkErrors(tx, id, sets, field, targetIds));
+    if (errors.length > 0) throw new SaveFailed(errors);
+    const changedLinks: LinkChange[] = [];
+    for (const [field, targetIds] of linkInput) {
+      const change = await this.replaceLinksLogged(tx, id, i.userId, field, targetIds);
+      if (change !== null) changedLinks.push(change);
+    }
+
+    const userChangedKeys = new Set(Object.keys(input));
+    const next: RecordState = { data: input, sets: new Map(sets) };
+    const res = await this.evaluate(tx, id, null, next, userChangedKeys);
+
+    const inserted = (await loadRecords(tx, [id])).get(id)!;
+    await this.persist(tx, inserted, null, res, i.userId, userChangedKeys, 0);
+    const seed: CascadeSeed = {
+      recordId: id, changedKeys: res.changedKeys, changedSets: new Set(res.state.sets.keys()), changedLinks,
+    };
+    return { id, seed };
+  }
+
+  /**
+   * The update step, inside the caller's transaction, for `stored` (already locked, of this workspace, at
+   * `i.expectedVersion`, not archived). Does not cascade: the returned seed is for the caller.
+   */
+  private async updateIn(tx: Db, i: UpdateInput, stored: StoredRecord): Promise<{ seed: CascadeSeed }> {
+    const prev = stateOf(stored);
+    const errors: RecordError[] = [];
+    const sets = new Map(prev.sets);
+    this.enableManualSets(sets, i.enableSets ?? [], errors);
+    this.disableManualSets(sets, i.disableSets ?? [], errors);
+    const raw = i.title === undefined ? { ...i.data } : { ...i.data, title: i.title };
+    const input = this.knownInput(raw, prev, errors);
+    if (errors.length > 0) throw new SaveFailed(errors);
+
+    const userChangedKeys = new Set(Object.keys(input).filter((k) => !sameValue(prev.data[k], input[k])));
+    const next: RecordState = { data: { ...prev.data, ...input }, sets };
+    const res = await this.evaluate(tx, i.id, prev, next, userChangedKeys);
+    await this.persist(tx, stored, prev, res, i.userId, userChangedKeys, i.expectedVersion);
+    const seed: CascadeSeed = {
+      recordId: i.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
+      changedLinks: [],
+    };
+    return { seed };
+  }
+
+  /**
+   * Writes the evaluated state of `stored` (version check against `expectedVersion`, then bump), its set
+   * changes and the change log of a user save; a lost version race is a `version_conflict`. The one place
+   * where "write, sets, log" happens for user saves.
+   */
+  private async persist(
+    tx: Db, stored: StoredRecord, prev: RecordState | null, res: EvalResult, userId: string,
+    userChangedKeys: Set<string>, expectedVersion: number,
+  ): Promise<void> {
+    const written = await writeRecord(tx, { ...stored, title: titleOf(res.state), data: res.state.data }, expectedVersion);
+    if (!written) throw new SaveFailed([versionConflict(stored.id)]);
+    await writeSets(tx, stored.id, stored.sets, res.state.sets);
+    await appendChangeLog(tx, this.changeEntries(stored.id, userId, prev, res, userChangedKeys));
   }
 
   /**
@@ -306,8 +317,7 @@ export class RecordService {
     tx: Db, id: string, sets: Map<string, string>, field: string, targetIds: string[],
   ): Promise<RecordError[]> {
     const def = this.cfg.fields.get(field);
-    const inEnabledSet = [...(this.cfg.setsOfField.get(field) ?? [])].some((s) => sets.has(s));
-    if (def?.type !== 'link' || !inEnabledSet) {
+    if (def?.type !== 'link' || !fieldInEnabledSet(this.cfg, sets, field)) {
       return [recordError('unknown_field', `Поле "${field}" не является связью включённых наборов записи`, { field })];
     }
     const targets = [...new Set(targetIds)];
