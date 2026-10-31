@@ -1,0 +1,43 @@
+# Решения исполнителя плана 2026-10-30-core-records
+
+Формат: решение — почему — цена ошибки. Собрано из журнала исполнения (subagent-driven development).
+
+- toolchain is TS 7 / vitest 5 (resolved at install); future briefs say `vitest.config.ts` projects instead of vitest.workspace.ts, each package needs its own vitest.config.ts excluding dist — newer majors are what exists today — cost: config tweaks if versions misbehave.
+- decimal-comma error only outside call argument lists (plan said always) — plan rule broke `MAX(1,2)`/`IF({a},1,2)`, spec §2.1 lists `,` as separator — cost: `ROUND(1,5)` inside calls is never flagged as decimal comma.
+- MIN/MAX also accept datetime (carried into Task 3) — plan listed number|money|date but comparisons and DAYS_BETWEEN accept datetime; inconsistency would surprise formula authors — cost: none.
+- text CONTAINS is case-insensitive (Unicode lowercasing) — Task 13 maps it to ILIKE and requires SQL/evaluate parity; users search "кам" in "Камера" — cost: no case-sensitive substring search in v1.
+- issue/src paths use bracket array form `rules[0].when` — Task 5 tests assert that form — cost: none.
+- label/indexed/was allowed on every field type — spec §1.11 `was` and `indexed` apply to any field — cost: none.
+- commit trailers name the model that actually wrote the commit (subagent's own attribution), not a fixed Opus line — accurate attribution — cost: mixed trailers in history.
+- rule `default` applies only when the rule becomes active (not active in prev, or during fixpoint); clearing a defaulted field keeps it empty — spec §2.3 "при срабатывании" overrides plan's per-pass fill — cost: users must re-trigger rule to get default back.
+- userChangedKeys = input keys whose value deep-differs from stored — engine treats userChangedKeys literally for readonly — cost: none.
+- validate errors only on exactly FALSE (null passes); rule re-activated within fixpoint applies defaults; stability check via own-property get — spec §2.3 "ложь → ошибка" + runtime-null never fails save — cost: none. Fix round 1/5 dispatched (FIX_BASE 0b43753).
+- RecordService normalizes "" / whitespace-only to null for non-text field types before engine; validates unknown_set, set_activation, set_required_by, adds closure of manual sets as 'manual' — engine leaves these to caller — cost: none.
+- rollupsFedBy also takes changedSets and matches rollups whose filter HAS_SET refs intersect — a related record gaining/losing a set can change filter results — cost: none.
+- all/any treat null as not-true; list/first skip empty values and keep related order — plan silent — cost: semantics tweak later.
+- @icrm/db gets a `./testing` export (freshDb + global-setup) reused by apps/server vitest config — freshDb currently unreachable outside packages/db — cost: none.
+- change_log old/new always store JSON (JSON null for "empty", SQL NULL never) — distinguishes cleared from absent — cost: none.
+- accept implementer judgment calls — manual disable of rule-enabled set → set_activation; enabling already-on set keeps label; unknown key resent unchanged dropped silently (changed → unknown_field); set_required_by checked before engine (conservative) — all consistent with spec §1.4 — cost: user must disable in two saves in rare case (#4).
+- set relabel (rule:a → rule:b) also gets a change_log `set` entry — useful audit, harmless — cost: none.
+- runCascade/rollupsFedBy receive changed set keys too (set enable/disable changes filters with HAS_SET) — reviewer flagged seam passes only changedKeys — cost: none.
+- rollups of sets enabled by a rule during a save are computed in the same save (refresh+re-evaluate loop, cap 3 → oscillation) — spec §1.8 consistency — cost: extra evaluate passes.
+- cascade change_log entries carry the triggering user's id (source stays 'cascade') — audit — cost: none.
+- accepted — create checks links only against explicitly passed sets; setLinks no-op on unchanged targets; runCascade optional limit param for tests; record-service.ts size (watch in final review).
+- fix concurrent hierarchical-cycle race with pg_advisory_xact_lock(workspace:field) — §1.7 relies on record-level acyclicity — cost: serializes hierarchical link edits per field.
+- refresh rollups only for sets enabled in the FINAL evaluated state; others keep stored value, no log — plan decision "fields of disabled sets untouched" — cost: none.
+- a source record whose link field's set is disabled still counts in the target's inverse rollups — links remain real data; excluding would need set-change cascades — cost: hidden links feed rollups.
+- Postgres deadlock (40P01) / serialization failure (40001) map to HTTP 409 {errors:[{code:'version_conflict', message:'повторите'}]} — client retries — cost: rare retry for users.
+- DATE("…") literal supported in filters (ADD_DAYS stays unsupported) — filters on dates need a literal — cost: none.
+- Postgres must run with a UTF-8 ctype locale (postgres:16-alpine default ok; set POSTGRES_INITDB_ARGS / LANG explicitly in compose) — Cyrillic lower() parity depends on it — cost: none.
+- list CONTAINS over money/datetime lists → unsupported_in_filter — no exact @> form — cost: rare filter unavailable.
+- also fix in round 1 — interpolate KEY_RE-asserted key as SQL literal (bound key defeats Task 12 expression indexes); wrap non-Expr errors into QueryError 'type'; blank text sorts last — spec §1.9 indexes + §5.3 structured errors — cost: none.
+- caps filter ≤2000 chars, AST depth ≤32 → QueryError type "фильтр слишком сложный" — cost: very complex filters rejected.
+- Task 14 server tests use their own config fixtures under apps/server/test/fixtures/{ok,broken}/ (montage.yaml has `notes` only in contact set, so the brief's patch {notes} on a task needs a fixture where task includes notes) — cost: none.
+- Task 14 spawns main via `tsx` (devDependency of @icrm/server) — Node 24 type stripping cannot resolve `.js`→`.ts` workspace imports — cost: one dev dep.
+- fix both ways — Postgres SQLSTATE class 22 (data exception) → 400 bad_request in the error handler, AND cap offset in db pagingValue (≤ Number.MAX_SAFE_INTEGER → QueryError) — defense in depth, ruling 8 — cost: none.
+- also fix in round 1 minors 1 (empty env = missing; token ≥ 16 chars; port 0 rejected), 3 (empty JSON body accepted on archive/query), 4 (order-independent tests), 5 (stronger assertions), 6 (shutdown rejection → log + exit 1) — cheap, same files — cost: none.
+- I1 — pass link presence (link field keys having ≥1 link) into the engine so `require` sees links; setLinks enforces `readonly` against the previous state — spec §2.3 require must work for any field — cost: engine input grows by one map.
+- I2 — guard every cast with jsonb_typeof; a stored value of the wrong JSON type is treated as empty in filters/sorts (matches evaluate, which treats unreadable values as null); class-22 → 400 logs a warning and the message no longer mentions NUL only — cost: none.
+- I3 — field recompute signature = defSignature + valueType + sorted setsOfField — cost: one extra recompute after upgrade.
+- I4 — bounded retry (3 attempts, small jittered backoff) on 40P01/40001 in RecordService.inTransaction and cascade recompute; HTTP 409 mapping stays for exhausted retries — cost: rare extra latency.
+- fix minors M1 (SyncReport carries recompute errors; orphan keys logged as warn), M2 (`was` validated at compile: no collision with a live key, no duplicate across fields), stale doc comment query.ts:105, .env.example token placeholder shorter than 16 so the server refuses to start until replaced. Defer M3 record-service refactor (before 1b), error-shape unification and money rounding (before web UI), cycle exemption/wave-limit, others per final-review.md triage.
