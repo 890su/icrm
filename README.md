@@ -68,9 +68,45 @@ curl -X POST http://127.0.0.1:3100/records \
 ## Конфиг
 
 `config/*.yaml` читаются по алфавиту и собираются в один конфиг: `workspace.yaml` (часовой пояс),
-`tasks.yaml` (поля, наборы, правила). Это пример для разработки; системные наборы `conversation` и
+`tasks.yaml` (поля, наборы, правила), `finance.yaml` (пример строк: расходы и доходы задачи). Это пример для разработки; системные наборы `conversation` и
 `contact` появятся в подпроектах 2–3. Ошибки конфига выводятся с файлом и строкой, сервер при этом не стартует.
 После изменения конфига перезапустите сервер: он пересчитает затронутые формулы и итоги.
+
+## Строки (аналитики)
+
+Строка — обычная запись со своими наборами, которая принадлежит записи-владельцу через поле-ссылку
+с `owned: true` (как аналитики в Планфиксе: расходы, доходы, позиции сметы). Пример — `config/finance.yaml`:
+у задачи поля `expenses` и `incomes`, итоги `expenses_total`, `incomes_total`, `transport_total`
+(с `filter` по виду расхода) и `margin = incomes_total - expenses_total`. Строки сохраняются вместе
+с владельцем одной транзакцией и одним каскадом пересчёта; ошибка любой строки откатывает весь пакет.
+
+Создание: пакет `rows` в `POST /records` (строка — `{title?, data?, sets?}`). Вид расхода «транспортные»
+сам включает набор `expense_transport` (`route`, `distance_km`):
+
+```sh
+curl -X POST http://127.0.0.1:3100/records   -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json"   -d '{"title":"Install cameras","sets":["task"],"rows":{
+        "expenses":[
+          {"sets":["expense"],"data":{"expense_kind":"транспортные","amount":40,"distance_km":120}},
+          {"sets":["expense"],"data":{"expense_kind":"комплектующие","amount":200}}],
+        "incomes":[{"sets":["income"],"data":{"amount":500}}]}}'
+```
+
+Изменение: тот же `rows` в `PATCH /records/:id`. Для каждого поля-владения в пакете можно смешивать три вида
+операций: новая строка (без `id`), изменение (`id` и `version` строки) и удаление (`id` и `delete: true`).
+Изменённые строки остаются на своих местах, новые добавляются в конец. `version` записи-владельца обязательна:
+
+```sh
+curl -X PATCH http://127.0.0.1:3100/records/<id>   -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json"   -d '{"version":1,"rows":{"expenses":[
+        {"id":"<id строки>","version":1,"data":{"amount":55}},
+        {"id":"<id другой строки>","delete":true},
+        {"sets":["expense"],"data":{"expense_kind":"прочие","amount":15}}]}}'
+```
+
+Чтение: `GET /records/:id` отдаёт `rows: {expenses: [...], incomes: [...]}` (без вложенных строк) и итоги
+владельца. Строки не попадают в `/query` по умолчанию; для отчётов по строкам всех записей передайте
+`{"includeRows": true}` (например, `{"filter":"HAS_SET(\"expense\")","includeRows":true}`).
+Переставить строки: `PUT /records/:id/links/expenses` с телом `{"targetIds":[...]}` в нужном порядке.
+Удаление строки архивирует её, архивирование владельца архивирует и его строки.
 
 ## Проверки
 

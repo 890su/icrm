@@ -28,7 +28,8 @@ fields:
 sets:
   task:
     label: Задача
-    fields: [description, responsible, due_date, done, kind, hours, rate, parent_task, own_hours, total_hours, branch_hours]
+    fields: [description, responsible, due_date, done, kind, hours, rate, parent_task, own_hours, total_hours, branch_hours,
+             expenses, incomes, expenses_total, incomes_total, transport_total, margin]
   montage:
     label: Монтаж
     activation: rule

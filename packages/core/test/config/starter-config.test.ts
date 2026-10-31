@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { evaluateRecord, type RecordState, type Value } from '../../src/index.js';
+import { evaluateRecord, ownedFieldsOf, type RecordState, type Value } from '../../src/index.js';
 import { loadConfigDir } from '../../src/node.js';
 
 const repoConfigDir = fileURLToPath(new URL('../../../../config', import.meta.url));
@@ -58,5 +58,48 @@ describe('starter config (config/)', () => {
 
   test('engine: work_cost = hours * rate', () => {
     expect(run({ kind: 'montage', hours: 3, rate: 100 }, { task: 'manual' }).state.data.work_cost).toBe(300);
+  });
+});
+
+describe('starter config: rows (finance.yaml)', () => {
+  test('task owns expenses and incomes as rows', () => {
+    expect(ownedFieldsOf(cfg, ['task'])).toEqual(['expenses', 'incomes']);
+    expect(cfg.fields.get('expenses')).toMatchObject({ type: 'link', owned: true, target_sets: ['expense'] });
+    expect(cfg.fields.get('incomes')).toMatchObject({ type: 'link', owned: true, target_sets: ['income'] });
+    expect(ownedFieldsOf(cfg, ['montage'])).toEqual([]);
+  });
+
+  test('row sets and totals', () => {
+    expect(cfg.sets.get('expense')!.fields).toEqual(
+      expect.arrayContaining(['expense_kind', 'amount', 'expense_date', 'note']));
+    expect(cfg.sets.get('expense_transport')).toMatchObject({ activation: 'rule', requires: ['expense'] });
+    expect(cfg.sets.get('expense_agent')).toMatchObject({ activation: 'rule', requires: ['expense'] });
+    expect(cfg.sets.get('income')!.fields).toEqual(
+      expect.arrayContaining(['amount', 'payer_account', 'received_date', 'note']));
+    expect(cfg.fields.get('expense_kind')).toMatchObject({
+      type: 'enum', options: ['транспортные', 'комплектующие', 'накладные', 'агентские', 'прочие'],
+    });
+    expect(cfg.rollups.find((r) => r.key === 'expenses_total')).toMatchObject({ via: 'expenses', agg: 'sum' });
+    expect(cfg.rollups.find((r) => r.key === 'transport_total')!.filterAst).toBeDefined();
+    expect(cfg.fields.get('margin')!.type).toBe('formula');
+  });
+
+  test('engine: a transport expense row enables expense_transport', () => {
+    const r = run({ expense_kind: 'транспортные', amount: 40 }, { expense: 'manual' });
+    expect(r.state.sets.get('expense_transport')).toBe('rule:expense_transport_by_kind');
+    expect(r.state.sets.has('expense_agent')).toBe(false);
+    expect(r.errors).toEqual([]);
+  });
+
+  test('engine: an agent expense row enables expense_agent', () => {
+    const r = run({ expense_kind: 'агентские', amount: 10 }, { expense: 'manual' });
+    expect(r.state.sets.get('expense_agent')).toBe('rule:expense_agent_by_kind');
+    expect(r.state.sets.has('expense_transport')).toBe(false);
+  });
+
+  test('engine: margin is a number (incomes_total - expenses_total)', () => {
+    const r = run({ incomes_total: 500, expenses_total: 120 }, { task: 'manual' });
+    expect(r.state.data.margin).toBe(380);
+    expect(typeof r.state.data.margin).toBe('number');
   });
 });

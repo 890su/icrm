@@ -1,0 +1,65 @@
+# Rows example (spec §1.12): expenses and incomes of a task are rows owned by it.
+# The `task` set lists `expenses`, `incomes` and the totals in tasks.yaml; everything else is defined here.
+fields:
+  expenses:
+    type: link
+    label: Расходы
+    target_sets: [expense]
+    cardinality: many
+    owned: true
+    inverse_label: Задача
+  incomes:
+    type: link
+    label: Доходы
+    target_sets: [income]
+    cardinality: many
+    owned: true
+    inverse_label: Задача
+  expenses_total: {type: rollup, label: Расходы итого, via: expenses, field: amount, agg: sum}
+  incomes_total: {type: rollup, label: Доходы итого, via: incomes, field: amount, agg: sum}
+  transport_total:
+    type: rollup
+    label: Транспортные расходы
+    via: expenses
+    field: amount
+    agg: sum
+    filter: '{expense_kind} = "транспортные"'
+  margin: {type: formula, label: Маржа, expr: '{incomes_total} - {expenses_total}'}
+
+  # Row fields. Money is a plain number here: the money rounding policy is deferred.
+  expense_kind: {type: enum, label: Вид расхода, options: [транспортные, комплектующие, накладные, агентские, прочие]}
+  amount: {type: number, label: Сумма}
+  expense_date: {type: date, label: Дата расхода}
+  note: {type: text, label: Примечание}
+  route: {type: text, label: Маршрут}
+  distance_km: {type: number, label: 'Расстояние, км'}
+  agent: {type: text, label: Агент}
+  agent_percent: {type: number, label: 'Процент агента, %'}
+  payer_account: {type: text, label: Счёт плательщика}
+  received_date: {type: date, label: Дата поступления}
+
+sets:
+  expense:
+    label: Расход
+    fields: [expense_kind, amount, expense_date, note]
+  expense_transport:
+    label: Транспортный расход
+    activation: rule
+    requires: [expense]
+    fields: [route, distance_km]
+  expense_agent:
+    label: Агентский расход
+    activation: rule
+    requires: [expense]
+    fields: [agent, agent_percent]
+  income:
+    label: Доход
+    fields: [amount, payer_account, received_date, note]
+
+rules:
+  - id: expense_transport_by_kind
+    when: '{expense_kind} = "транспортные"'
+    enable_set: expense_transport
+  - id: expense_agent_by_kind
+    when: '{expense_kind} = "агентские"'
+    enable_set: expense_agent
