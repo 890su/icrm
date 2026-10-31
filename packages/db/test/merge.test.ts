@@ -175,6 +175,17 @@ test('conflicts default to target, choice takes source; empty B fields are fille
   expect(unknown).toEqual({ ok: false, errors: [expect.objectContaining({ code: 'unknown_field', field: 'no_such_field' })] });
 });
 
+test('a manual set of A that B lacks is enabled on B before links to A move', async () => {
+  const a = await create('Vip A', ['contact', 'vip'], { vip_level: 2 });
+  const b = await create('Vip B', ['contact']);
+  const gift = await create('Gift', ['asset'], {}, { sponsor: [a.id] });
+  const r = await cs.merge({ sourceId: a.id, targetId: b.id, userId });
+  expect(r.ok, JSON.stringify(r)).toBe(true);
+  expect(r.ok && r.record.sets.map((s) => s.key)).toEqual(['contact', 'vip']);
+  expect(r.ok && r.record.data.vip_level).toBe(2);
+  expect((await get(gift.id)).links.sponsor).toEqual([b.id]);
+});
+
 test('organizations with the same NIP merge; memberships move to B', async () => {
   const a = await create('Firma NIP', ['organization'], { nip: '525-000-00-09', org_kind: 'фирма' });
   const b = await create('Firma NIP sp. z o.o.', ['organization'], { nip: '5260000011' });

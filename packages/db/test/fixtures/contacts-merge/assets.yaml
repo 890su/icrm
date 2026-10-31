@@ -2,6 +2,7 @@
 fields:
   assigned: {type: link, label: Закреплено за, target_sets: [contact], cardinality: one, inverse_label: Имущество}
   kit: {type: link, label: Выдано участию, target_sets: [membership], cardinality: one, inverse_label: Выданное}
+  sponsor: {type: link, label: Спонсор, target_sets: [vip], cardinality: one, inverse_label: Спонсирует}
   user_of: {type: link, label: Пользователь, target_sets: [contact], cardinality: one, inverse_label: Учётные записи}
   locked: {type: bool, label: Заблокирована}
   devices: {type: link, label: Устройства, target_sets: [device], cardinality: many, owned: true, inverse_label: Владелец}
@@ -10,7 +11,7 @@ fields:
   referrer: {type: link, label: Кто привёл, target_sets: [contact], cardinality: one, inverse_label: Привёл}
   vip_level: {type: number, label: Уровень VIP}
 sets:
-  asset: {label: Имущество, fields: [assigned, kit]}
+  asset: {label: Имущество, fields: [assigned, kit, sponsor]}
   account: {label: Учётная запись, fields: [user_of, locked]}
   device: {label: Устройство, fields: [serial]}
   vip: {label: VIP, fields: [vip_level]}

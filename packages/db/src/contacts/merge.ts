@@ -189,10 +189,10 @@ const versionOf = async (tx: Db, workspaceId: string, id: string): Promise<numbe
 
 /**
  * Merges `sourceId` (`A`) into `targetId` (`B`) in one transaction (spec 2a §6.2): `A` and `B` are locked
- * first (id order) and checked; then addresses, memberships (twins collapse into the one of `B`), links to
- * `A`, rows and own links of `A`, users move to `B`; the merge steps run; `A` gets `merged_into = B` and is
- * archived; last, `B` gets the chosen and its empty values and the manual sets of `A` (after the archive of
- * `A`, so a shared NIP does not stand in the way). Any failure rolls everything back. The result is the view
+ * first (id order) and checked; `B` gets the manual sets of `A` it lacks; then addresses, memberships (twins
+ * collapse into the one of `B`), links to `A`, rows and own links of `A`, users move to `B`; the merge steps
+ * run; `A` gets `merged_into = B` and is archived; last, `B` gets the chosen and its empty values (after the
+ * archive of `A`, so a shared NIP does not stand in the way). Any failure rolls everything back. The result is the view
  * of `B` after commit.
  */
 export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
@@ -211,6 +211,12 @@ export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
     }
     const today = todayIn(d.now(), d.cfg.timezone);
 
+    // 0. The manual sets of A that B lacks, first: links to A and own links of A may need them on B.
+    const enableSets = [...a.sets].filter(([key, by]) => by === MANUAL && !b.sets.has(key)).map(([key]) => key);
+    if (enableSets.length > 0) {
+      await ops.update({ id: b.id, userId: i.userId, expectedVersion: b.version, enableSets });
+    }
+
     // 1. Addresses.
     for (const x of await d.identities.liveOf(tx, [a.id])) await d.identities.moveIn(tx, x.id, b.id, i.userId);
 
@@ -222,7 +228,8 @@ export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
       await relink(ops, d.workspaceId, l, a.id, l.fromId === b.id ? null : b.id, i.userId);
     }
 
-    // 4–5. Rows and own links of A go to the same fields of B; fields of sets B gains are written after them.
+    // 4–5. Rows and own links of A go to the same fields of B; a field B still lacks (of a set that only a
+    // rule enables) is written after the values of B, which may enable it.
     const later: { field: string; targets: () => Promise<string[] | null> }[] = [];
     const writeB = async (field: string, targets: () => Promise<string[] | null>): Promise<void> => {
       const fresh = (await loadRecords(tx, [b.id], { workspaceId: d.workspaceId })).get(b.id)!;
@@ -263,7 +270,7 @@ export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
     await ops.setLinks({ id: a.id, userId: i.userId, field: MERGED_INTO, targetIds: [b.id], system: true });
     await ops.archive({ id: a.id, userId: i.userId });
 
-    // 9. Values and sets of B.
+    // 9. Values of B (after the archive of A, so a shared NIP does not stand in the way).
     const bNow = (await loadRecords(tx, [b.id], { workspaceId: d.workspaceId, forUpdate: true })).get(b.id)!;
     const data: Record<string, Value> = {};
     for (const key of valueFields(d.cfg, a.sets.keys())) {
@@ -272,10 +279,9 @@ export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
       if (isEmpty(tv) || choice[key] === 'source') data[key] = sv!;
     }
     const takeTitle = !isEmpty(a.title) && a.title !== bNow.title && (isEmpty(bNow.title) || choice.title === 'source');
-    const enableSets = [...a.sets].filter(([key, by]) => by === MANUAL && !bNow.sets.has(key)).map(([key]) => key);
-    if (Object.keys(data).length > 0 || takeTitle || enableSets.length > 0) {
+    if (Object.keys(data).length > 0 || takeTitle) {
       await ops.update({
-        id: b.id, userId: i.userId, expectedVersion: bNow.version, data, enableSets,
+        id: b.id, userId: i.userId, expectedVersion: bNow.version, data,
         ...(takeTitle ? { title: a.title } : {}),
       });
     }
