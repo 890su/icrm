@@ -9,7 +9,7 @@ export {
 export { ancestorsVia, linksFrom, linksTo, replaceLinks } from './repo/links.js';
 export { appendChangeLog, type ChangeEntry } from './repo/change-log.js';
 export {
-  RecordService, type ArchiveInput, type CreateInput, type RecomputeError, type RecordView, type SaveResult,
+  RecordService, type ArchiveInput, type CreateInput, type RecomputeError, type RecordView, type RowView, type SaveResult,
   type SetLinksInput, type UpdateInput,
 } from './service/record-service.js';
 export { isRetryable } from './service/retry.js';

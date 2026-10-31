@@ -1,5 +1,5 @@
 import {
-  fieldStatesOf, readonlyErrors,
+  fieldStatesOf, ownedFieldsOf, readonlyErrors,
   type CompiledConfig, type EvalResult, type FieldState, type RecordError, type RecordState, type Value,
 } from '@icrm/core';
 import { sql, type Kysely, type Transaction } from 'kysely';
@@ -32,7 +32,17 @@ export interface RecordView {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  /**
+   * The non-archived rows (spec §1.12) per owned link field of the enabled sets, in link order. Present on
+   * `get` and on the result of a save, only for a record with at least one owned field among its enabled sets
+   * (then every such field has a key, possibly `[]`); omitted otherwise. One level: a row's own rows are
+   * not expanded here (`get` of the row shows them).
+   */
+  rows?: Record<string, RowView[]>;
 }
+
+/** A row as shown inside its owner: a record view without its own `rows`. */
+export type RowView = Omit<RecordView, 'rows'>;
 
 export type SaveResult = { ok: true; record: RecordView } | { ok: false; errors: RecordError[] };
 
@@ -653,7 +663,8 @@ export class RecordService {
     return this.view(tx, rec);
   }
 
-  private async view(tx: Db, rec: StoredRecord): Promise<RecordView> {
+  /** The record's view; `withRows: false` (for a row inside its owner) leaves out `rows`. */
+  private async view(tx: Db, rec: StoredRecord, withRows = true): Promise<RecordView> {
     const links: Record<string, string[]> = {};
     for (const set of rec.sets.keys()) {
       for (const key of this.cfg.sets.get(set)?.fields ?? []) {
@@ -663,7 +674,7 @@ export class RecordService {
     }
     const { title: _title, ...data } = rec.data;
     const sets = [...rec.sets].map(([key, enabledBy]) => ({ key, enabledBy }));
-    return {
+    const view: RecordView = {
       id: rec.id,
       title: rec.title,
       data,
@@ -675,6 +686,27 @@ export class RecordService {
       updatedAt: rec.updatedAt.toISOString(),
       archivedAt: rec.archivedAt?.toISOString() ?? null,
     };
+    if (withRows) {
+      const rows = await this.rowsOf(tx, rec, links);
+      if (rows !== undefined) view.rows = rows;
+    }
+    return view;
+  }
+
+  /** Views of the live rows of every owned field of `rec`'s enabled sets, loaded with one query; undefined without owned fields. */
+  private async rowsOf(tx: Db, rec: StoredRecord, links: Record<string, string[]>): Promise<Record<string, RowView[]> | undefined> {
+    const fields = ownedFieldsOf(this.cfg, rec.sets.keys());
+    if (fields.length === 0) return undefined;
+    const loaded = await loadRecords(tx, fields.flatMap((f) => links[f] ?? []), { workspaceId: this.workspaceId });
+    const rows: Record<string, RowView[]> = {};
+    for (const field of fields) {
+      rows[field] = [];
+      for (const id of links[field] ?? []) {
+        const row = loaded.get(id);
+        if (row !== undefined && row.archivedAt === null) rows[field].push(await this.view(tx, row, false));
+      }
+    }
+    return rows;
   }
 }
 

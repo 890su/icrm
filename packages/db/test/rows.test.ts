@@ -1,9 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { loadConfigDir } from '@icrm/core/node';
-import type { Value } from '@icrm/core';
+import type { CompiledConfig, Value } from '@icrm/core';
 import type { Kysely } from 'kysely';
 import { beforeAll, describe, expect, test } from 'vitest';
-import { ensureWorkspace, RecordService, type DB, type RecordView, type SaveResult } from '../src/index.js';
+import { ensureWorkspace, queryRecords, RecordService, type DB, type RecordView, type SaveResult } from '../src/index.js';
 import { freshDb } from './setup-pg.js';
 
 const CONFIG_DIR = fileURLToPath(new URL('./fixtures/rows/', import.meta.url));
@@ -12,11 +12,12 @@ const NOW = new Date('2026-10-31T10:00:00Z');
 let db: Kysely<DB>;
 let userId: string;
 let svc: RecordService;
+let cfg: CompiledConfig;
 let workspaceId: string;
 
 beforeAll(async () => {
   ({ db, workspaceId, userId } = await freshDb());
-  const cfg = await loadConfigDir(CONFIG_DIR);
+  cfg = await loadConfigDir(CONFIG_DIR);
   svc = new RecordService({ db, cfg, workspaceId, now: () => NOW });
 });
 
@@ -510,5 +511,71 @@ describe('row deletion and owner lifecycle', () => {
     const res = await svc.create({ userId, title: 'T', sets: ['task'], links: { expenses: [standalone.id] } });
     expect(res).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'link_owned', field: 'expenses' })] });
     expect(await ownerOf(standalone.id)).toEqual({ ownerId: null, ownerField: null });
+  });
+});
+
+describe('rows in reads', () => {
+  /** A task with two expense rows marked with `note`; the first row also owns a sub-row (budget_lines). */
+  async function markedRows(note: string) {
+    const owner = record(await svc.create({ userId, title: 'T', sets: ['task'], data: { rate: 1 }, rows: { expenses: [
+      expense({ amount: 1, note }), expense({ amount: 2, note }),
+    ] } }));
+    const [a, b] = owner.links.expenses!;
+    const a1 = await must(a!);
+    const a2 = record(await svc.update({ id: a!, userId, expectedVersion: a1.version, enableSets: ['budget'],
+      rows: { budget_lines: [expense({ amount: 3 })] } }));
+    return { owner: await must(owner.id), a: a2, b: b! };
+  }
+
+  test('get returns rows of owned fields, one level deep', async () => {
+    const { owner, a, b } = await markedRows('rd-one');
+    const v = (await svc.get(owner.id))!;
+    expect(v.rows!.expenses!.map((r) => r.id)).toEqual(v.links.expenses);
+    expect(v.rows!.expenses!.map((r) => r.id)).toEqual([a.id, b]);
+    expect(v.rows!.primary_expense).toEqual([]);
+    expect(v.rows!.expenses![0]).not.toHaveProperty('rows');
+    expect(v.rows!.expenses![0]).toMatchObject({ data: { amount: 1, note: 'rd-one', task_rate: 1 }, version: a.version });
+    expect(v.rows!.expenses![0]!.links.budget_lines).toEqual(a.links.budget_lines);
+    // the row's own get expands its own rows
+    const row = (await svc.get(a.id))!;
+    expect(row.rows!.budget_lines!.map((r) => r.id)).toEqual(a.links.budget_lines);
+    expect(row.rows!.budget_lines![0]).not.toHaveProperty('rows');
+  });
+
+  test('a save result carries rows; a record without owned fields has no rows key', async () => {
+    const res = record(await svc.create({ userId, title: 'T', sets: ['task'], data: { rate: 1 }, rows: { expenses: [expense({ amount: 4 })] } }));
+    expect(res.rows!.expenses!.map((r) => r.id)).toEqual(res.links.expenses);
+    expect(res.rows!.expenses![0]).toMatchObject({ data: { amount: 4 } });
+    const plain = record(await svc.create({ userId, title: 'Расход', sets: ['expense'], data: { amount: 1 } }));
+    expect(plain).not.toHaveProperty('rows');
+    expect(await must(plain.id)).not.toHaveProperty('rows');
+  });
+
+  test('deleted rows are not shown; rows of an archived owner are not shown either', async () => {
+    const { owner: o, a, b } = await taskWithRows();
+    const after = record(await svc.update({ id: o.id, userId, expectedVersion: o.version, rows: { expenses: [{ id: a.id, delete: true }] } }));
+    expect(after.rows!.expenses!.map((r) => r.id)).toEqual([b.id]);
+    const gone = record(await svc.archive({ id: o.id, userId }));
+    expect(gone.links.expenses).toEqual([b.id]);
+    expect(gone.rows!.expenses).toEqual([]);
+    expect((await must(o.id)).rows!.expenses).toEqual([]);
+  });
+
+  test('query hides rows unless includeRows', async () => {
+    await markedRows('q-mark');
+    const f = { filter: 'HAS_SET("expense") AND {note} = "q-mark"' };
+    expect((await queryRecords(db, cfg, workspaceId, f, NOW)).total).toBe(0);
+    const withRows = await queryRecords(db, cfg, workspaceId, { ...f, includeRows: true }, NOW);
+    expect(withRows.total).toBe(2);
+    expect(withRows.items).toHaveLength(2);
+    expect((await queryRecords(db, cfg, workspaceId, { ...f, includeRows: false }, NOW)).items).toEqual([]);
+  });
+
+  test('rows of an archived owner stay hidden from includeRows unless includeArchived', async () => {
+    const { owner } = await markedRows('qa-mark');
+    record(await svc.archive({ id: owner.id, userId }));
+    const f = { filter: 'HAS_SET("expense") AND {note} = "qa-mark"', includeRows: true };
+    expect((await queryRecords(db, cfg, workspaceId, f, NOW)).total).toBe(0);
+    expect((await queryRecords(db, cfg, workspaceId, { ...f, includeArchived: true }, NOW)).total).toBe(2);
   });
 });

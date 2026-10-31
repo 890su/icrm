@@ -14,6 +14,8 @@ export interface QueryInput {
   limit?: number;
   offset?: number;
   includeArchived?: boolean;
+  /** Rows owned by other records (spec §1.12) are left out unless true; archived ones still need `includeArchived`. */
+  includeRows?: boolean;
 }
 
 export interface QueryOutput {
@@ -459,6 +461,7 @@ export async function queryRecords(
 
   let base = db.selectFrom('records').where('workspace_id', '=', workspaceId);
   if (q.includeArchived !== true) base = base.where('archived_at', 'is', null);
+  if (q.includeRows !== true) base = base.where('owner_id', 'is', null);
   if (filter !== undefined) base = base.where(sql<boolean>`${filter}`);
 
   const { n } = await base.select((eb) => eb.fn.countAll<string>().as('n')).executeTakeFirstOrThrow();
