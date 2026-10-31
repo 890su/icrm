@@ -207,7 +207,8 @@ export class RecordService {
   }
 
   /**
-   * Replaces the targets of link field `field` (spec §1.5 checks), logs the change, refreshes the record's
+   * Replaces the targets of link field `field` (spec §1.5 checks, for the targets the field does not have
+   * yet; see `linkErrors`), logs the change, refreshes the record's
    * own rollups, re-evaluates and writes it (version bump), then cascades to the old and new targets.
    * Setting the targets the record already has is a no-op. A change of a field the rules make `readonly`
    * (judged by the stored state, as for values) is rejected; the re-evaluation sees the new links, so a
@@ -684,10 +685,13 @@ export class RecordService {
   /**
    * Spec §1.5 checks for setting `targetIds` on link field `field` of record `id` with enabled `sets`:
    * the field is a link of an enabled set (`unknown_field`), `cardinality: one` allows one target
-   * (`link_cardinality`), each target exists in this workspace, is not archived and has one of
-   * `target_sets` (`link_target`), and a hierarchical link must not close a cycle (`link_cycle`).
-   * On an owned field each target must instead be a non-archived row of record `id` and `field`
-   * (`link_owned`): a record becomes a row only through `rows` (spec §1.12).
+   * (`link_cardinality`, on the full list), and each target NOT already on that field of that record exists
+   * in this workspace, is not archived and has one of `target_sets` (`link_target`), and a hierarchical
+   * link to it must not close a cycle (`link_cycle`). Targets the field already has stay valid as they are
+   * (reorder, keep, add next to them), so a relink is not blocked by an old target that got archived since.
+   * On an owned field every target, kept or new, must instead be a non-archived row of record `id` and
+   * `field` (`link_owned`): a record becomes a row only through `rows` (spec §1.12); the rows already linked
+   * always pass, so the check is not narrowed there and stays strict about adoption.
    */
   private async linkErrors(
     tx: Db, id: string, sets: Map<string, string>, field: string, targetIds: string[],
@@ -702,8 +706,10 @@ export class RecordService {
       errors.push(recordError('link_cardinality', `Поле «${def.label}» допускает только одну связь`, { field }));
     }
     const wanted = def.target_sets ?? [];
-    const loaded = await loadRecords(tx, targets);
-    for (const target of targets) {
+    const current = def.owned === true ? new Set<string>() : new Set(await linksFrom(tx, id, field));
+    const checked = targets.filter((t) => !current.has(t));
+    const loaded = await loadRecords(tx, checked);
+    for (const target of checked) {
       const t = loaded.get(target);
       if (def.owned === true) {
         const row = t !== undefined && t.workspaceId === this.workspaceId && t.ownerId === id && t.ownerField === field;

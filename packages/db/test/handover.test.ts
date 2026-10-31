@@ -155,6 +155,16 @@ test('a rule of the source record rejecting the relink rolls everything back and
   expect(await cs.resolveAddress('phone', phoneOfM)).toMatchObject({ membership: { id: m.id } });
 });
 
+test('a source that also links an archived membership in a many-field relinks fine', async () => {
+  const { m, firmaX, ewa } = await scene();
+  const old = await membership(await create('Old', ['contact']), firmaX);
+  const printer = await create('Printer', ['equipment'], {}, { users: [old.id, m.id] });
+  must(await rec.archive({ id: old.id, userId }));
+  const r = await cs.endMembership({ id: m.id, version: m.version, date: '2026-11-30', userId, successor: { contactId: ewa.id } });
+  expect(r.ok, JSON.stringify(r)).toBe(true);
+  expect((await rec.get(printer.id))!.links.users).toEqual([old.id, r.ok ? r.successor!.id : '']);
+});
+
 test('already ended membership and a successor from another organization are rejected', async () => {
   const { m, ewa } = await scene();
   const ended = await cs.endMembership({ id: m.id, version: m.version, date: '2026-11-30', userId, successor: null });

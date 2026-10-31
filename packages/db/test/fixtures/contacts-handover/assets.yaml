@@ -2,9 +2,10 @@
 fields:
   holder: {type: link, label: Держатель, target_sets: [membership, organization], cardinality: one, inverse_label: Оборудование}
   user_of: {type: link, label: Пользователь, target_sets: [membership], cardinality: one, inverse_label: Учётные записи}
+  users: {type: link, label: Пользователи, target_sets: [membership], cardinality: many, inverse_label: Общее оборудование}
   locked: {type: bool, label: Заблокирована}
 sets:
-  equipment: {label: Оборудование, fields: [holder]}
+  equipment: {label: Оборудование, fields: [holder, users]}
   account: {label: Учётная запись, fields: [user_of, locked]}
 rules:
   - id: locked_account_frozen

@@ -316,6 +316,25 @@ describe('link checks', () => {
     expect(after.version).toBe(t.version);
   });
 
+  test('targets already on the field are not re-checked; new ones are', async () => {
+    const w1 = await mk(['person']);
+    const w2 = await mk(['person']);
+    const gone = await mk(['person']);
+    const p = await mk(['person'], {}, { watchers: [gone.id, w1.id] });
+    record(await svc.archive({ id: gone.id, userId }));
+
+    // reordering, keeping the archived target and adding a live one is fine
+    expect((await link(p.id, 'watchers', [w1.id, gone.id, w2.id])).links.watchers).toEqual([w1.id, gone.id, w2.id]);
+
+    // a new archived target is still rejected
+    const goneToo = await mk(['person']);
+    await svc.archive({ id: goneToo.id, userId });
+    const r = await svc.setLinks({ id: p.id, userId, field: 'watchers', targetIds: [w1.id, gone.id, w2.id, goneToo.id] });
+    expect(r).toEqual({ ok: false, errors: [expect.objectContaining({ code: 'link_target', field: 'watchers' })] });
+    expect(!r.ok && r.errors[0]!.message).toContain(goneToo.id);
+    expect((await get(p.id)).links.watchers).toEqual([w1.id, gone.id, w2.id]);
+  });
+
   test('only a link field of an enabled set can be linked', async () => {
     const conv = await mk(['conversation']);
     const t = await mk(['task']);
