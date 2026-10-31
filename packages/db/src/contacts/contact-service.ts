@@ -6,13 +6,13 @@ import { organizationsByEmailDomain } from '../repo/organizations.js';
 import { loadRecords } from '../repo/records.js';
 import type { DB } from '../schema.js';
 import { recordError } from '../service/errors.js';
-import type { RecordService } from '../service/record-service.js';
+import type { RecordService, SaveResult } from '../service/record-service.js';
 import {
-  endMembership, handoverOf, take, unassignedOf, type EndMembershipInput, type Handover, type HandoverDeps,
-  type HandoverResult,
+  endMembership, handoverOf, take, unassignedOf, type EndMembershipInput, type Handover, type HandoverResult,
 } from './handover.js';
 import type { IdentityService, IdentityView } from './identities.js';
 import { isActiveOn, membershipsOf } from './memberships.js';
+import { merge, mergePreview, type MergeChoice, type MergeDeps, type MergePreview, type MergeStep } from './merge.js';
 
 export interface RecordRef { id: string; title: string }
 
@@ -26,7 +26,7 @@ export type ResolveResult =
 /**
  * Operations on contacts and organizations that span several records (spec 2a §4–§6): matching a channel
  * address to a contact and its counterparty, ending a membership with the handover of what hangs on it
- * (the logic lives in `handover.ts`).
+ * (the logic lives in `handover.ts`), merging duplicates (`merge.ts`).
  */
 export class ContactService {
   private readonly db: Kysely<DB>;
@@ -35,10 +35,12 @@ export class ContactService {
   private readonly now: () => Date;
   readonly records: RecordService;
   readonly identities: IdentityService;
+  private readonly mergeSteps: readonly MergeStep[];
 
+  /** `mergeSteps` run inside every merge, in order (spec 2a §6.2 p.8); none in 2a. */
   constructor(o: {
     db: Kysely<DB>; cfg: CompiledConfig; workspaceId: string; now?: () => Date;
-    records: RecordService; identities: IdentityService;
+    records: RecordService; identities: IdentityService; mergeSteps?: MergeStep[];
   }) {
     this.db = o.db;
     this.cfg = o.cfg;
@@ -46,6 +48,7 @@ export class ContactService {
     this.now = o.now ?? (() => new Date());
     this.records = o.records;
     this.identities = o.identities;
+    this.mergeSteps = [...(o.mergeSteps ?? [])];
   }
 
   /**
@@ -122,9 +125,20 @@ export class ContactService {
     return take(this.deps(), i);
   }
 
-  private deps(): HandoverDeps {
+  /** What merging `sourceId` into `targetId` would do: conflicts and what moves (spec 2a §6.1). */
+  mergePreview(sourceId: string, targetId: string): Promise<{ ok: true; preview: MergePreview } | { ok: false; errors: RecordError[] }> {
+    return mergePreview(this.deps(), sourceId, targetId);
+  }
+
+  /** Merges duplicate `sourceId` into `targetId` (spec 2a §6.2); the record of the result is `targetId`'s view. */
+  merge(i: { sourceId: string; targetId: string; values?: MergeChoice; userId: string }): Promise<SaveResult> {
+    return merge(this.deps(), i);
+  }
+
+  private deps(): MergeDeps {
     return {
       db: this.db, cfg: this.cfg, workspaceId: this.workspaceId, now: this.now, records: this.records, identities: this.identities,
+      mergeSteps: this.mergeSteps,
     };
   }
 

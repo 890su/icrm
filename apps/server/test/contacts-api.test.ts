@@ -225,3 +225,36 @@ describe('handover', () => {
     expect((await call('POST', `/memberships/${successorId}/take`, { identities: [] })).statusCode).toBe(400);
   });
 });
+
+describe('merge', () => {
+  test('preview (200 / 422 / 404), merge (200 / 422 / 404 / 400)', async () => {
+    const a = (await call('POST', '/records', { title: 'Kasia', sets: ['contact'], data: { notes: 'A' } })).json();
+    const b = (await call('POST', '/records', { title: 'Kasia', sets: ['contact'], data: { notes: 'B' } })).json();
+    const org = await create('Firma Merge', ['organization']);
+    const phone = (await call('POST', `/records/${a.id}/identities`, { channel: 'phone', address: '600 900 100' })).json();
+
+    const preview = await call('GET', `/records/${a.id}/merge-preview?into=${b.id}`);
+    expect(preview.statusCode, preview.body).toBe(200);
+    expect(preview.json()).toEqual({
+      kind: 'contact', conflicts: [{ field: 'notes', source: 'A', target: 'B' }], identities: 1, memberships: [], links: 0, rows: 0 });
+    const mismatch = await call('GET', `/records/${a.id}/merge-preview?into=${org.id}`);
+    expect(mismatch.statusCode).toBe(422);
+    expect(mismatch.json().errors[0].code).toBe('merge_kind_mismatch');
+    expect((await call('GET', `/records/${a.id}/merge-preview?into=${MISSING}`)).statusCode).toBe(404);
+    expect((await call('GET', `/records/${a.id}/merge-preview`)).statusCode).toBe(400);
+
+    expect((await call('POST', `/records/${a.id}/merge`, { into: a.id })).json().errors[0].code).toBe('merge_self');
+    expect((await call('POST', `/records/${MISSING}/merge`, { into: b.id })).statusCode).toBe(404);
+    expect((await call('POST', `/records/${a.id}/merge`, { into: b.id, values: { notes: 'mine' } })).statusCode).toBe(400);
+    expect((await call('POST', `/records/${a.id}/merge`, { into: b.id, extra: 1 })).statusCode).toBe(400);
+
+    const merged = await call('POST', `/records/${a.id}/merge`, { into: b.id, values: { notes: 'source' } });
+    expect(merged.statusCode, merged.body).toBe(200);
+    expect(merged.json()).toMatchObject({ id: b.id, data: { notes: 'A' }, identities: [expect.objectContaining({ id: phone.id })] });
+    const source = (await call('GET', `/records/${a.id}`)).json();
+    expect(source).toMatchObject({ archivedAt: expect.any(String), links: { merged_into: [b.id] } });
+    const again = await call('POST', `/records/${a.id}/merge`, { into: b.id });
+    expect(again.statusCode).toBe(422);
+    expect(again.json().errors[0].code).toBe('merge_archived');
+  });
+});

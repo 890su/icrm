@@ -126,21 +126,32 @@ export async function unassignedOf(d: HandoverDeps, organizationId: string): Pro
 }
 
 /**
- * Re-points one link from `from` to `to` by saving its source record through the regular pipeline (rules,
- * readonly, cardinality, behaviours, log; the cascade runs with the transaction's). The source is locked
- * before its targets are read; a link that vanished meanwhile is a `version_conflict` of the source. Errors
- * of that save name the source record (and the field, when they have none).
+ * Re-points the link of record `l.fromId` through `l.field` from `from` to `to` (null: drops it) by saving
+ * that source record through the regular pipeline (rules, readonly, cardinality, behaviours, log; the cascade
+ * runs with the transaction's); a target already there is not repeated. The source is locked (after its
+ * owner, when it is a row) before its targets are read; a link that vanished meanwhile is a
+ * `version_conflict` of the source. Errors of that save name the source record (and the field, when they
+ * have none).
  */
-async function relink(ops: TxOps, workspaceId: string, l: HandoverLink, from: string, to: string, userId: string): Promise<void> {
+export async function relink(
+  ops: TxOps, workspaceId: string, l: { fromId: string; field: string }, from: string, to: string | null, userId: string,
+): Promise<void> {
+  const ownerId = (await loadRecords(ops.tx, [l.fromId], { workspaceId })).get(l.fromId)?.ownerId ?? null;
+  if (ownerId !== null) await loadRecords(ops.tx, [ownerId], { workspaceId, forUpdate: true });
   await loadRecords(ops.tx, [l.fromId], { workspaceId, forUpdate: true });
   const targets = await linksFrom(ops.tx, l.fromId, l.field);
   if (!targets.includes(from)) throw new SaveFailed([{ ...versionConflict(l.fromId), recordId: l.fromId, field: l.field }]);
-  const next = [...new Set(targets.map((t) => (t === from ? to : t)))];
+  const next = [...new Set(targets.flatMap((t) => (t !== from ? [t] : to === null ? [] : [to])))];
+  await naming(l.fromId, l.field, () => ops.setLinks({ id: l.fromId, userId, field: l.field, targetIds: next }));
+}
+
+/** Runs `save` of record `recordId`; its errors name that record (and `field`, when they have none). */
+export async function naming<T>(recordId: string, field: string, save: () => Promise<T>): Promise<T> {
   try {
-    await ops.setLinks({ id: l.fromId, userId, field: l.field, targetIds: next });
+    return await save();
   } catch (e) {
     if (!(e instanceof SaveFailed)) throw e;
-    throw new SaveFailed(e.errors.map((x) => ({ ...x, recordId: x.recordId ?? l.fromId, field: x.field ?? l.field })));
+    throw new SaveFailed(e.errors.map((x) => ({ ...x, recordId: x.recordId ?? recordId, field: x.field ?? field })));
   }
 }
 

@@ -1,10 +1,10 @@
 import { fileURLToPath } from 'node:url';
 import { loadConfigDir } from '@icrm/core/node';
 import type { CompiledConfig, Value } from '@icrm/core';
-import { sql, type Kysely } from 'kysely';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import { beforeAll, describe, expect, test } from 'vitest';
 import {
-  ensureWorkspace, queryRecords, RecordService, replaceLinks, type DB, type RecordView, type SaveResult,
+  ensureWorkspace, queryRecords, RecordService, replaceLinks, setOwner, type DB, type RecordView, type SaveResult,
 } from '../src/index.js';
 import { freshDb } from './setup-pg.js';
 
@@ -778,5 +778,57 @@ describe('lock order of direct saves of a row (owner before row)', () => {
     const { owner, a } = await taskWithRows();
     const res = await waitsForOwnerFirst(owner.id, a.id, () => svc.archive({ id: a.id, userId }));
     expect(res.ok).toBe(true);
+  });
+
+  test('a row save locks the new owner when the owner changed meanwhile', async () => {
+    const { owner, a } = await taskWithRows();
+    const other = record(await svc.create({ userId, title: 'Other', sets: ['task'], data: { rate: 3 } }));
+    /** Runs `lock` in a transaction that stays open until the returned `release` is called. */
+    async function hold(lock: (tx: Transaction<DB>) => Promise<void>): Promise<{ release: () => Promise<void> }> {
+      let done!: () => void;
+      const held = new Promise<void>((r) => { done = r; });
+      let locked!: () => void;
+      const ready = new Promise<void>((r) => { locked = r; });
+      const t = db.transaction().execute(async (tx) => {
+        try { await lock(tx); } finally { locked(); }
+        await held;
+      });
+      await ready;
+      return { release: async () => { done(); await t; } };
+    }
+    // One transaction holds the old owner and hands the row to `other` (as a merge does, spec 2a §6); another
+    // holds `other` (no key update: the hand-over's foreign key check only shares its key).
+    const mover = await hold(async (tx) => {
+      await sql`select id from records where id = ${owner.id} for update`.execute(tx);
+      await setOwner(tx, [a.id], other.id);
+    });
+    const newOwner = await hold(async (tx) => {
+      await sql`select id from records where id = ${other.id} for no key update`.execute(tx);
+    });
+    let settled = false;
+    const pending = svc.update({ id: a.id, userId, expectedVersion: a.version, data: { amount: 12 } })
+      .finally(() => { settled = true; });
+    try {
+      await someoneWaits(); // the save read the old owner and waits for it
+      await mover.release();
+      // under the old owner's lock the row names `other`: the save now waits for `other`
+      await new Promise((r) => setTimeout(r, 300));
+      expect(settled).toBe(false);
+    } finally {
+      await mover.release();
+      await newOwner.release();
+    }
+    const res = await pending;
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    expect(res.ok && res.record).toMatchObject({ ownerId: other.id, data: { amount: 12 } });
+    expect(await ownerOf(a.id)).toEqual({ ownerId: other.id, ownerField: 'expenses' });
+    expect((await must(other.id)).version).toBe(other.version);
+
+    // without the race: the save of a row whose owner changed before it started
+    const { a: c } = await taskWithRows();
+    await setOwner(db, [c.id], other.id);
+    const direct = await svc.update({ id: c.id, userId, expectedVersion: c.version, data: { amount: 13 } });
+    expect(direct.ok && direct.record.ownerId).toBe(other.id);
+    expect((await must(other.id)).version).toBe(other.version);
   });
 });

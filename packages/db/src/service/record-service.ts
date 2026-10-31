@@ -422,26 +422,35 @@ export class RecordService {
 
   /**
    * `lockEditable` for a direct save of record `id`; when it is a row (spec §1.12), its owner is locked
-   * first (`lockOwnerOf`), keeping the lock order of a batch (owner before rows). Under the locks: a row
-   * whose owner is archived is `archived`. `owner` is undefined for a record that is not a row.
+   * first, keeping the lock order of a batch (owner before rows). The owner is read unlocked, and a merge of
+   * duplicates (spec 2a §6) may hand the row to another owner meanwhile: when the locked row names another
+   * owner, that owner is locked too and the row re-read (once; a row that changed hands again is a
+   * `version_conflict`). Under the locks: a row whose owner is archived is `archived`. `owner` is undefined
+   * for a record that is not a row.
    */
   private async lockWithOwner(
     tx: Db, id: string, expectedVersion?: number,
   ): Promise<{ stored: StoredRecord; owner?: StoredRecord }> {
-    const owner = await this.lockOwnerOf(tx, id);
-    const stored = await this.lockEditable(tx, id, expectedVersion);
+    const peeked = await this.ownerIdOf(tx, id);
+    let owner = await this.lockOwner(tx, peeked);
+    let stored = await this.lockEditable(tx, id, expectedVersion);
+    if (stored.ownerId !== peeked) {
+      const ownerId = stored.ownerId;
+      owner = await this.lockOwner(tx, ownerId);
+      stored = await this.lockEditable(tx, id, expectedVersion);
+      if (stored.ownerId !== ownerId) throw new SaveFailed([versionConflict(id)]);
+    }
     if (owner !== undefined && owner.archivedAt !== null) throw new SaveFailed([archived(id)]);
     return { stored, owner };
   }
 
-  /**
-   * Locks the owner of record `id` when `id` is a row of this workspace and returns it (undefined
-   * otherwise). The row's `owner_id` is read unlocked: it never changes after insert, so the row locked
-   * afterwards has the same owner.
-   */
-  private async lockOwnerOf(tx: Db, id: string): Promise<StoredRecord | undefined> {
-    const peek = (await loadRecords(tx, [id], { workspaceId: this.workspaceId })).get(id);
-    const ownerId = peek?.ownerId ?? null;
+  /** The owner of record `id` of this workspace when it is a row, read unlocked; null otherwise. */
+  private async ownerIdOf(tx: Db, id: string): Promise<string | null> {
+    return (await loadRecords(tx, [id], { workspaceId: this.workspaceId })).get(id)?.ownerId ?? null;
+  }
+
+  /** Locks owner `ownerId` of this workspace and returns it; undefined for no owner. */
+  private async lockOwner(tx: Db, ownerId: string | null): Promise<StoredRecord | undefined> {
     if (ownerId === null) return undefined;
     return (await loadRecords(tx, [ownerId], { forUpdate: true, workspaceId: this.workspaceId })).get(ownerId);
   }

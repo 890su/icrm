@@ -68,8 +68,9 @@ curl -X POST http://127.0.0.1:3100/records \
 ## Конфиг
 
 `config/*.yaml` читаются по алфавиту и собираются в один конфиг: `workspace.yaml` (часовой пояс),
-`tasks.yaml` (поля, наборы, правила), `finance.yaml` (пример строк: расходы и доходы задачи). Это пример
-для разработки; системные наборы `conversation` и `contact` появятся в подпроектах 2–3. Ошибки конфига
+`tasks.yaml` (поля, наборы, правила), `finance.yaml` (пример строк: расходы и доходы задачи), `contacts.yaml`
+(расширение системных наборов контактов, см. ниже). Это пример для разработки; системный набор
+`conversation` появится в подпроекте 3. Ошибки конфига
 выводятся с файлом и строкой, сервер при этом не стартует.
 После изменения конфига перезапустите сервер: он пересчитает затронутые формулы и итоги.
 
@@ -126,6 +127,79 @@ curl -X PATCH http://127.0.0.1:3100/records/<id> \
 значения владельца (его формулы и итоги ещё не посчитаны). Сохранённые значения строки после этого всё равно
 пересчитываются каскадом от нового значения владельца.
 
+## Контакты и организации
+
+Подробности — `docs/superpowers/specs/2026-10-31-contacts-organizations-design.md`.
+
+**Системные наборы и `extend`.** Наборы `contact` (человек: `notes`, `needs_review`), `organization`
+(фирма или частный клиент: `org_kind`, `nip`, `address`, `email_domains`) и `membership` (участие контакта
+в организации: `contact`, `organization`, `role`, `position`, `active_from`, `active_to`, `is_primary`)
+поставляются пакетом `core`. Свой YAML не объявляет их заново, а расширяет секцией `extend`: свои поля
+в системные наборы и `label`/`options` системных полей (роли — в `config/contacts.yaml`):
+
+```yaml
+fields:
+  birthday: {type: date, label: День рождения}
+extend:
+  sets:
+    contact: {fields: [birthday]}
+  fields:
+    role: {options: [ЛПР, бухгалтер, техник, муж, жена, сын, дочь, другое]}
+```
+
+Служебные поля (`merged_into`) заполняет только код: запись их через API — `managed_field`. NIP организации
+нормализуется до 10 цифр, проверяется (`nip_invalid`) и уникален среди живых записей (`nip_taken`);
+у пары «контакт + организация» одно действующее участие (`membership_active_exists`), у контакта одно
+основное (`primary_conflict`).
+
+**Адреса.** Email, телефон и Telegram — адреса (identities) контакта, участия («телефон бухгалтера Firma X»)
+или организации (общий ящик). Адрес нормализуется (телефон — в E.164, страна по умолчанию —
+`workspace.phone_region`, `PL`) и уникален среди живых: второй владелец получает `identity_taken`
+с `ownerId`/`ownerTitle`. WhatsApp — не отдельный канал: его адрес — телефон, поиск с `whatsapp` идёт по `phone`.
+`GET /records/:id` у контакта, участия и организации отдаёт `identities`, у контакта и организации — `memberships`:
+
+```sh
+curl -X POST http://127.0.0.1:3100/records/<id контакта>/identities   -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json"   -d '{"channel":"phone","address":"600 100 200","label":"рабочий"}'
+```
+
+Перенести адрес — `POST /identities/:id/move` `{"to":"<id>"}`, архивировать — `DELETE /identities/:id`,
+поиск по части адреса — `GET /identities?q=600100`.
+
+**Сопоставление.** По адресу входящего находится, кто пишет и от какой организации: владелец-контакт
+(организация — по его единственному или основному действующему участию), участие (контакт и организация
+участия, `membershipEnded` для закрытого) или организация. Для незнакомого email `hints` — организации
+с доменом адреса в `email_domains`:
+
+```sh
+curl "http://127.0.0.1:3100/identities/lookup?channel=whatsapp&address=%2B48600100200"   -H "Authorization: Bearer $ICRM_API_TOKEN"
+```
+
+**Уход из организации и передача дел.** `GET /memberships/:id/handover` показывает адреса участия и связи
+на него (оборудование, учётки). `POST /memberships/:id/end` закрывает участие датой `date` и одной транзакцией
+передаёт их преемнику (`{"membershipId"}` — существующее участие той же организации, `{"contactId"}` —
+создать новое), организации, контакту, оставляет (`keep`) или архивирует адреса; по умолчанию всё уходит
+преемнику, а без него — организации (связи из полей, не допускающих организацию, остаются). Отказ правила
+записи-источника откатывает всё и называет её (`recordId`). Незакреплённое за людьми — `GET
+/organizations/:id/unassigned`, закрепить — `POST /memberships/:id/take` `{"identities":[...],"links":[...]}`:
+
+```sh
+curl -X POST http://127.0.0.1:3100/memberships/<id>/end   -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json"   -d '{"version":3,"date":"2026-11-30","successor":{"contactId":"<id контакта>"},
+       "identities":{"<id адреса>":"contact"},"links":{"<linkId>":"organization"}}'
+```
+
+**Слияние дублей.** Контакт сливается с контактом, организация с организацией (иначе `merge_kind_mismatch`;
+сама с собой — `merge_self`; архивная — `merge_archived`). `GET /records/:a/merge-preview?into=:b` показывает
+конфликты (поля, где у обоих разные непустые значения, и связи «одна» с разными целями) и что переедет:
+адреса, участия (и какие схлопнутся с действующим участием `B` в той же организации), связи, строки.
+`POST /records/:a/merge` одной транзакцией переносит всё это на `B`, перевешивает связи других живых записей
+и пользователей, архивирует `A` с `merged_into = B` и заполняет у `B` пустые поля и выбранные значения
+(по умолчанию в конфликте остаётся значение `B`); ответ — запись `B`. Слияние необратимо, история —
+в журнале изменений:
+
+```sh
+curl -X POST http://127.0.0.1:3100/records/<id A>/merge   -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json"   -d '{"into":"<id B>","values":{"notes":"source","nip":"target"}}'
+```
+
 ## Проверки
 
 ```sh
@@ -139,5 +213,5 @@ pnpm test        # интеграционные тесты db/server подни�
 |---|---|
 | `packages/core` | чистая доменная логика: конфиг, выражения, движок записи |
 | `packages/db` | схема и миграции Postgres, сохранение записи, каскад итогов, синхронизация конфига |
-| `apps/server` | Fastify API: `/meta`, `/records`, `/query` |
+| `apps/server` | Fastify API: `/meta`, `/records`, `/query`, адреса, участия, слияние |
 | `config/` | YAML-конфиг |

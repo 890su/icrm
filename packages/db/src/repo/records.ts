@@ -12,7 +12,7 @@ export interface StoredRecord {
   createdAt: Date;
   updatedAt: Date;
   archivedAt: Date | null;
-  /** Owning record when this record is a row; set only at insert. */
+  /** Owning record when this record is a row; set at insert, changed only by a merge of duplicates (`setOwner`). */
   ownerId: string | null;
   ownerField: string | null;
 }
@@ -70,6 +70,15 @@ export async function liveRowIds(tx: Db, ownerIds: string[], workspaceId: string
     .where('owner_id', 'in', ownerIds).where('workspace_id', '=', workspaceId).where('archived_at', 'is', null)
     .orderBy('id').execute();
   return rows.map((r) => r.id);
+}
+
+/**
+ * Hands rows to another owner of the same owned field (`owner_field` stays): the one change of `owner_id`
+ * after insert, made by a merge of duplicates (spec 2a §6). Not a value of the rows: their `version` stays.
+ */
+export async function setOwner(tx: Db, rowIds: string[], ownerId: string): Promise<void> {
+  if (rowIds.length === 0) return;
+  await tx.updateTable('records').set({ owner_id: ownerId }).where('id', 'in', rowIds).execute();
 }
 
 export async function insertRecord(

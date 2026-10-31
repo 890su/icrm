@@ -6,6 +6,7 @@ import { registerAuth } from './auth.js';
 import { registerErrorHandling } from './errors.js';
 import { registerIdentityRoutes } from './routes/identities.js';
 import { registerMembershipRoutes } from './routes/memberships.js';
+import { registerMergeRoutes } from './routes/merge.js';
 import { registerMetaRoutes } from './routes/meta.js';
 import { registerQueryRoutes } from './routes/query.js';
 import { registerRecordRoutes } from './routes/records.js';
@@ -45,6 +46,7 @@ export function buildServer(o: ServerOptions): FastifyInstance {
   registerRecordRoutes(app, { service: services.records, systemUserId: o.systemUserId });
   registerIdentityRoutes(app, { identities: services.identities, contacts: services.contacts, systemUserId: o.systemUserId });
   registerMembershipRoutes(app, { contacts: services.contacts, systemUserId: o.systemUserId });
+  registerMergeRoutes(app, { contacts: services.contacts, systemUserId: o.systemUserId });
   registerQueryRoutes(app, { db: o.db, cfg: o.cfg, workspaceId: o.workspaceId, now });
   return app;
 }

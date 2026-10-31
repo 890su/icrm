@@ -3,6 +3,7 @@ import type { Kysely } from 'kysely';
 import { contactBehaviors } from './contacts/behaviors.js';
 import { ContactService } from './contacts/contact-service.js';
 import { IdentityService } from './contacts/identities.js';
+import type { MergeStep } from './contacts/merge.js';
 import type { DB } from './schema.js';
 import { RecordService } from './service/record-service.js';
 
@@ -13,8 +14,9 @@ export interface Services {
   contacts: ContactService;
 }
 
+/** `mergeSteps` — the steps of later sub-projects that every merge of duplicates runs (spec 2a §6.2 p.8). */
 export function createServices(o: {
-  db: Kysely<DB>; cfg: CompiledConfig; workspaceId: string; now?: () => Date;
+  db: Kysely<DB>; cfg: CompiledConfig; workspaceId: string; now?: () => Date; mergeSteps?: MergeStep[];
 }): Services {
   const now = o.now ?? ((): Date => new Date());
   const identities = new IdentityService(o);

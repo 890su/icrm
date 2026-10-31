@@ -4,7 +4,7 @@ export { migrateToLatest } from './migrate.js';
 export { ensureWorkspace, SYSTEM_USER_EMAIL } from './seed.js';
 export type { Db } from './repo/types.js';
 export {
-  insertRecord, loadRecords, writeRecord, writeSets, type StoredRecord,
+  insertRecord, loadRecords, setOwner, writeRecord, writeSets, type StoredRecord,
 } from './repo/records.js';
 export { ancestorsVia, linksFrom, linksTo, replaceLinks } from './repo/links.js';
 export { appendChangeLog, type ChangeEntry } from './repo/change-log.js';
@@ -21,6 +21,9 @@ export { ContactService, type RecordRef, type ResolveResult } from './contacts/c
 export type {
   EndMembershipInput, Handover, HandoverLink, HandoverResult, IdentityTarget, LinkTarget,
 } from './contacts/handover.js';
+export type {
+  MergeChoice, MergeConflict, MergeInput, MergeKind, MergePreview, MergeStep,
+} from './contacts/merge.js';
 export { contactBehaviors } from './contacts/behaviors.js';
 export { isActiveOn, membershipsOf, type MembershipView } from './contacts/memberships.js';
 export { createServices, type Services } from './services.js';
