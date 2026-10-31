@@ -38,10 +38,12 @@ TypeScript monorepo (pnpm workspaces): `packages/core` (чистая домен�
 Подпроекты 1 «Ядро записей» и 1b «Строки записи (аналитики)» реализованы и слиты в `main`:
 `packages/core`, `packages/db`, `apps/server` (минимальный API `/meta`, `/records`, `/query`);
 владеемые связи (`owned: true`), пакет `rows`, `includeRows`; стартовый конфиг в `config/`.
-Запуск и переменные окружения — `README.md`.
-Дальше: подпроект 2a «Контакты и организации: основа» (спецификация
-`docs/superpowers/specs/2026-10-31-contacts-organizations-design.md`, план
-`docs/superpowers/plans/2026-10-31-contacts-core.md`), затем 2b.
+Подпроект 2a «Контакты и организации: основа» реализован (ветка `feat/contacts-core`):
+системные наборы `contact`/`organization`/`membership` встроены в `@icrm/core` (расширяются
+секцией `extend`), адреса каналов, сопоставление, передача дел, слияние дублей
+(спецификация `docs/superpowers/specs/2026-10-31-contacts-organizations-design.md`).
+Запуск и переменные окружения — `README.md`. Дальше: подпроект 2b (дубли, NIP, импорт),
+затем 3 «Разговоры».
 Архитектурная спецификация: `docs/superpowers/specs/2026-10-30-icrm-architecture-design.md`.
 
 ## Sub-projects
