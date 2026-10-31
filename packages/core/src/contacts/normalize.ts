@@ -27,10 +27,16 @@ function normalizeEmail(raw: string): string | null {
   const [local, domain] = parts as [string, string];
   if (!local || !domain || /\s/.test(value)) return null;
   if (!domain.includes('.')) return null;
+  // Every dot-separated label must be non-empty (rejects ".pl", "firma.", "a..pl").
+  if (domain.split('.').some((label) => label === '')) return null;
   return value;
 }
 
+// Only digits and common separators: the library would otherwise pull a number out of free text.
+const PHONE_CHARS_RE = /^[0-9\s()+\-./]+$/;
+
 function normalizePhone(raw: string, region: string): string | null {
+  if (!PHONE_CHARS_RE.test(raw)) return null;
   const parsed = parsePhoneNumberFromString(raw.trim(), region as CountryCode);
   return parsed?.isValid() ? parsed.number : null;
 }

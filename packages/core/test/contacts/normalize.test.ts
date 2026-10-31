@@ -8,11 +8,11 @@ test.each([
   ['+48 600 100 200', '+48600100200'], ['600-100-200', '+48600100200'], ['0048600100200', '+48600100200'],
   ['(+48) 600 100 200', '+48600100200'], ['+44 20 7946 0958', '+442079460958'],
 ])('phone %s → %s', (raw, e164) => expect(normalizeAddress('phone', raw, 'PL')).toEqual({ ok: true, normalized: e164, display: raw.trim() }));
-test.each(['12', 'abc', '+48 600'])('phone %s is invalid', (raw) => expect(normalizeAddress('phone', raw, 'PL').ok).toBe(false));
+test.each(['12', 'abc', '+48 600', 'abc 600100200', '600100200abc', 'call me +48 600 100 200 please', '600 100 200 ext 5'])('phone %s is invalid', (raw) => expect(normalizeAddress('phone', raw, 'PL').ok).toBe(false));
 test('region decides national numbers', () => expect(normalizeAddress('phone', '030 901820', 'DE')).toMatchObject({ ok: true, normalized: '+4930901820' }));
 test('email', () => {
   expect(normalizeAddress('email', ' Jan.Kowalski@Firma.PL ', 'PL')).toEqual({ ok: true, normalized: 'jan.kowalski@firma.pl', display: 'Jan.Kowalski@Firma.PL' });
-  for (const bad of ['jan@', '@firma.pl', 'a@b@c.pl', 'jan@localhost', '']) expect(normalizeAddress('email', bad, 'PL').ok).toBe(false);
+  for (const bad of ['jan@', '@firma.pl', 'a@b@c.pl', 'jan@localhost', '', 'jan@.pl', 'jan@firma.', 'jan@a..pl']) expect(normalizeAddress('email', bad, 'PL').ok).toBe(false);
 });
 test('telegram', () => {
   expect(normalizeAddress('telegram', '123456789', 'PL')).toMatchObject({ normalized: '123456789' });
