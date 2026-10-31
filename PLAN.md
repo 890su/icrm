@@ -7,7 +7,8 @@ updated: 2026-10-31
 # Plan: iCRM
 
 ## In progress
-- нет активных задач
+- [ ] Ревью плана подпроекта 1b пользователем и выбор способа исполнения
+  - Файл: `docs/superpowers/plans/2026-10-31-record-rows.md` (спецификация §1.12 уточнена)
 
 ## Next
 - [ ] Рефакторинг `packages/db/src/service/record-service.ts` (дублирование `sameValue`, `hasField`/`inEnabledSet`, четырёхкратная последовательность сохранения) — до 1b
