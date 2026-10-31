@@ -1,0 +1,12 @@
+# Handover (spec 2a §5): equipment may be held by a membership or an organization, an account only by a membership.
+fields:
+  holder: {type: link, label: Держатель, target_sets: [membership, organization], cardinality: one, inverse_label: Оборудование}
+  user_of: {type: link, label: Пользователь, target_sets: [membership], cardinality: one, inverse_label: Учётные записи}
+  locked: {type: bool, label: Заблокирована}
+sets:
+  equipment: {label: Оборудование, fields: [holder]}
+  account: {label: Учётная запись, fields: [user_of, locked]}
+rules:
+  - id: locked_account_frozen
+    when: '{locked}'
+    readonly: [user_of]

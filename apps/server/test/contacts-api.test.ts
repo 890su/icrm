@@ -13,7 +13,7 @@ let app: FastifyInstance;
 
 beforeAll(async () => {
   const fresh = await freshDb();
-  const cfg = await loadConfigDir(fixture('ok'));
+  const cfg = await loadConfigDir(fixture('contacts'));
   app = buildServer({
     db: fresh.db, cfg, workspaceId: fresh.workspaceId, systemUserId: fresh.userId, apiToken: TOKEN,
     now: () => new Date('2026-10-31T10:00:00Z'),
@@ -167,5 +167,61 @@ describe('organizations and memberships', () => {
       expect(view.memberships).toEqual([expect.objectContaining({
         id: m.json().id, contactTitle: 'Anna API', organizationTitle: 'Firma M', active: true })]);
     }
+  });
+});
+
+describe('handover', () => {
+  test('preview, end with a successor (200 / 422), unassigned and take', async () => {
+    const olga = await create('Olga', ['contact']);
+    const piotr = await create('Piotr', ['contact']);
+    const org = await create('Firma H', ['organization']);
+    const m = (await call('POST', '/records', {
+      title: '', sets: ['membership'], data: { role: ['техник'] }, links: { contact: [olga.id], organization: [org.id] } })).json();
+    const phone = (await call('POST', `/records/${m.id}/identities`, { channel: 'phone', address: '600 700 800' })).json();
+    const laptop = (await call('POST', '/records', { title: 'Laptop H', sets: ['equipment'], links: { holder: [m.id] } })).json();
+
+    const preview = await call('GET', `/memberships/${m.id}/handover`);
+    expect(preview.statusCode, preview.body).toBe(200);
+    expect(preview.json()).toEqual({
+      identities: [phone],
+      links: [{ linkId: expect.any(String), field: 'holder', fromId: laptop.id, fromTitle: 'Laptop H', organizationAllowed: true }],
+    });
+    expect((await call('GET', `/memberships/${MISSING}/handover`)).statusCode).toBe(404);
+
+    const invalid = await call('POST', `/memberships/${m.id}/end`, {
+      version: m.version, date: '2026-11-30', successor: null, identities: { [phone.id]: 'successor' } });
+    expect(invalid.statusCode).toBe(422);
+    expect(invalid.json().errors[0].code).toBe('handover_target_invalid');
+    expect((await call('POST', `/memberships/${m.id}/end`, { version: m.version, date: '2026-11-30' })).statusCode).toBe(400);
+    expect((await call('POST', `/memberships/${m.id}/end`, {
+      version: m.version, date: '2026-11-30', successor: null, extra: 1 })).statusCode).toBe(400);
+    const stale = await call('POST', `/memberships/${m.id}/end`, { version: m.version + 1, date: '2026-11-30', successor: null });
+    expect(stale.statusCode).toBe(409);
+
+    const ended = await call('POST', `/memberships/${m.id}/end`, {
+      version: m.version, date: '2026-11-30', successor: { contactId: piotr.id }, links: { [preview.json().links[0].linkId]: 'organization' } });
+    expect(ended.statusCode, ended.body).toBe(200);
+    expect(ended.json()).toMatchObject({
+      membership: { id: m.id, data: { active_to: '2026-11-30' } },
+      successor: { title: 'Piotr — Firma H', data: { role: ['техник'] } } });
+    const successorId = ended.json().successor.id;
+    expect((await call('GET', `/records/${laptop.id}`)).json().links.holder).toEqual([org.id]);
+    expect((await call('GET', `/records/${successorId}`)).json().identities).toEqual([expect.objectContaining({ id: phone.id })]);
+
+    const free = await call('GET', `/organizations/${org.id}/unassigned`);
+    expect(free.statusCode, free.body).toBe(200);
+    expect(free.json()).toEqual({
+      identities: [],
+      links: [{ linkId: expect.any(String), field: 'holder', fromId: laptop.id, fromTitle: 'Laptop H', organizationAllowed: true }],
+    });
+    expect((await call('GET', `/organizations/${MISSING}/unassigned`)).statusCode).toBe(404);
+
+    const taken = await call('POST', `/memberships/${successorId}/take`, { identities: [], links: [free.json().links[0].linkId] });
+    expect(taken.statusCode, taken.body).toBe(200);
+    expect(taken.json()).toMatchObject({ membership: { id: successorId }, successor: null });
+    expect((await call('GET', `/records/${laptop.id}`)).json().links.holder).toEqual([successorId]);
+    expect((await call('POST', `/memberships/${successorId}/take`, { identities: [MISSING], links: [] })).statusCode).toBe(422);
+    expect((await call('POST', `/memberships/${MISSING}/take`, { identities: [], links: [] })).statusCode).toBe(404);
+    expect((await call('POST', `/memberships/${successorId}/take`, { identities: [] })).statusCode).toBe(400);
   });
 });

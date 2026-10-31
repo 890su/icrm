@@ -7,6 +7,10 @@ import { loadRecords } from '../repo/records.js';
 import type { DB } from '../schema.js';
 import { recordError } from '../service/errors.js';
 import type { RecordService } from '../service/record-service.js';
+import {
+  endMembership, handoverOf, take, unassignedOf, type EndMembershipInput, type Handover, type HandoverDeps,
+  type HandoverResult,
+} from './handover.js';
 import type { IdentityService, IdentityView } from './identities.js';
 import { isActiveOn, membershipsOf } from './memberships.js';
 
@@ -20,8 +24,9 @@ export type ResolveResult =
   };
 
 /**
- * Operations on contacts and organizations that span several records (spec 2a §4–§6). Here: matching a
- * channel address to a contact and its counterparty.
+ * Operations on contacts and organizations that span several records (spec 2a §4–§6): matching a channel
+ * address to a contact and its counterparty, ending a membership with the handover of what hangs on it
+ * (the logic lives in `handover.ts`).
  */
 export class ContactService {
   private readonly db: Kysely<DB>;
@@ -92,6 +97,35 @@ export class ContactService {
     const active = ofContact.filter((m) => m.organizationId !== null && orgs.get(m.organizationId)?.archivedAt === null);
     const pick = active.length === 1 ? active[0] : active.find((m) => m.isPrimary);
     return pick?.organizationId == null ? null : { id: pick.organizationId, title: pick.organizationTitle ?? '' };
+  }
+
+  /** What hangs on a membership: its live addresses and the links to it (spec 2a §5.1); null — no such membership. */
+  handover(membershipId: string): Promise<Handover | null> {
+    return handoverOf(this.deps(), membershipId);
+  }
+
+  /** Ends a membership and hands over its addresses and links (spec 2a §5.2), in one transaction. */
+  endMembership(i: EndMembershipInput): Promise<HandoverResult> {
+    return endMembership(this.deps(), i);
+  }
+
+  /**
+   * The addresses of an organization and the links to it from fields that also allow a membership: what can
+   * be assigned to a person (spec 2a §5.3); null — no such organization.
+   */
+  unassigned(organizationId: string): Promise<Handover | null> {
+    return unassignedOf(this.deps(), organizationId);
+  }
+
+  /** Moves the chosen addresses and links of its organization to an active membership (spec 2a §5.3); `successor` is null. */
+  take(i: { membershipId: string; identities: string[]; links: string[]; userId: string }): Promise<HandoverResult> {
+    return take(this.deps(), i);
+  }
+
+  private deps(): HandoverDeps {
+    return {
+      db: this.db, cfg: this.cfg, workspaceId: this.workspaceId, now: this.now, records: this.records, identities: this.identities,
+    };
   }
 
   /** The first record that `fromId` links to through `field`, unless it is archived. */

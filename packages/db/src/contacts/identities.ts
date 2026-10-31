@@ -109,15 +109,13 @@ export class IdentityService {
 
   /** Archives an address; it stays for the messages that refer to it and no longer blocks its spelling. */
   async archive(i: { id: string; userId: string }): Promise<IdentityResult> {
-    const res = await this.run(async (tx) => {
-      const { identity } = await this.lockIdentity(tx, i.id);
-      if (identity.archivedAt !== null) throw new SaveFailed([identityArchived(i.id)]);
-      const at = this.now();
-      await archiveIdentities(tx, [i.id], at);
-      await this.log(tx, i.userId, 'user', [{ recordId: identity.ownerId, old: logged(identity), new: null }]);
-      return { ...identity, archivedAt: at.toISOString() };
-    });
+    const res = await this.run((tx) => this.archiveRow(tx, i.id, i.userId));
     return res.ok ? { ok: true, identity: res.value } : { ok: false, errors: res.errors };
+  }
+
+  /** Inside the caller's transaction: archives an address like `archive`; failures are thrown as `SaveFailed`. */
+  async archiveIn(tx: Db, identityId: string, userId: string): Promise<void> {
+    await this.archiveRow(tx, identityId, userId);
   }
 
   /** Live addresses whose normalised or displayed form contains `q`, with their owners' titles. */
@@ -162,6 +160,15 @@ export class IdentityService {
       { recordId: toOwnerId, old: null, new: logged(identity) },
     ]);
     return { ...identity, ownerId: toOwnerId };
+  }
+
+  private async archiveRow(tx: Db, id: string, userId: string): Promise<IdentityView> {
+    const { identity } = await this.lockIdentity(tx, id);
+    if (identity.archivedAt !== null) throw new SaveFailed([identityArchived(id)]);
+    const at = this.now();
+    await archiveIdentities(tx, [id], at);
+    await this.log(tx, userId, 'user', [{ recordId: identity.ownerId, old: logged(identity), new: null }]);
+    return { ...identity, archivedAt: at.toISOString() };
   }
 
   /** Locks the owners (workspace records, id order) and checks each can own addresses. */

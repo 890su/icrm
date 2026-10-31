@@ -1,0 +1,8 @@
+# Contacts API (spec 2a): a plain task, and equipment that a membership or an organization may hold (§5).
+workspace:
+  timezone: Europe/Warsaw
+fields:
+  holder: {type: link, label: Держатель, target_sets: [membership, organization], cardinality: one, inverse_label: Оборудование}
+sets:
+  task: {label: Задача, fields: [title]}
+  equipment: {label: Оборудование, fields: [holder]}
