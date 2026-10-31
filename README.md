@@ -68,8 +68,9 @@ curl -X POST http://127.0.0.1:3100/records \
 ## Конфиг
 
 `config/*.yaml` читаются по алфавиту и собираются в один конфиг: `workspace.yaml` (часовой пояс),
-`tasks.yaml` (поля, наборы, правила), `finance.yaml` (пример строк: расходы и доходы задачи). Это пример для разработки; системные наборы `conversation` и
-`contact` появятся в подпроектах 2–3. Ошибки конфига выводятся с файлом и строкой, сервер при этом не стартует.
+`tasks.yaml` (поля, наборы, правила), `finance.yaml` (пример строк: расходы и доходы задачи). Это пример
+для разработки; системные наборы `conversation` и `contact` появятся в подпроектах 2–3. Ошибки конфига
+выводятся с файлом и строкой, сервер при этом не стартует.
 После изменения конфига перезапустите сервер: он пересчитает затронутые формулы и итоги.
 
 ## Строки (аналитики)
@@ -84,7 +85,9 @@ curl -X POST http://127.0.0.1:3100/records \
 сам включает набор `expense_transport` (`route`, `distance_km`):
 
 ```sh
-curl -X POST http://127.0.0.1:3100/records   -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json"   -d '{"title":"Install cameras","sets":["task"],"rows":{
+curl -X POST http://127.0.0.1:3100/records \
+  -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Install cameras","sets":["task"],"rows":{
         "expenses":[
           {"sets":["expense"],"data":{"expense_kind":"транспортные","amount":40,"distance_km":120}},
           {"sets":["expense"],"data":{"expense_kind":"комплектующие","amount":200}}],
@@ -96,17 +99,32 @@ curl -X POST http://127.0.0.1:3100/records   -H "Authorization: Bearer $ICRM_API
 Изменённые строки остаются на своих местах, новые добавляются в конец. `version` записи-владельца обязательна:
 
 ```sh
-curl -X PATCH http://127.0.0.1:3100/records/<id>   -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json"   -d '{"version":1,"rows":{"expenses":[
+curl -X PATCH http://127.0.0.1:3100/records/<id> \
+  -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"version":1,"rows":{"expenses":[
         {"id":"<id строки>","version":1,"data":{"amount":55}},
         {"id":"<id другой строки>","delete":true},
         {"sets":["expense"],"data":{"expense_kind":"прочие","amount":15}}]}}'
 ```
 
-Чтение: `GET /records/:id` отдаёт `rows: {expenses: [...], incomes: [...]}` (без вложенных строк) и итоги
-владельца. Строки не попадают в `/query` по умолчанию; для отчётов по строкам всех записей передайте
-`{"includeRows": true}` (например, `{"filter":"HAS_SET(\"expense\")","includeRows":true}`).
+На Windows тело с кириллицей надёжнее отправлять из файла в UTF-8: `curl ... --data-binary @body.json`
+(строка в командной строке может уйти не в UTF-8).
+
+Чтение: `GET /records/:id` отдаёт `rows: {expenses: [...], incomes: [...]}` (без вложенных строк)
+и итоги владельца; у строки `ownerId` и `ownerField` указывают на владельца (у обычной записи — `null`).
+Строки не попадают в `/query` по умолчанию; для отчётов по строкам всех записей передайте
+`{"includeRows": true}`, например `{"filter":"HAS_SET(\"expense\")","includeRows":true}`.
+
 Переставить строки: `PUT /records/:id/links/expenses` с телом `{"targetIds":[...]}` в нужном порядке.
-Удаление строки архивирует её, архивирование владельца архивирует и его строки.
+**Строки, чьих `id` нет в `targetIds`, архивируются** (как удаление). Удаление строки архивирует её,
+архивирование владельца архивирует и его строки. Правило `readonly` на поле-владении (по сохранённому
+состоянию владельца) запрещает добавлять, удалять и исключать строки; значения строк подчиняются правилам
+самой строки.
+
+Ограничение: правило строки, зависящее от значения владельца (итог по обратной связи, например
+`agg: first`), в рамках одного сохранения видит предыдущее значение владельца, а при создании — введённые
+значения владельца (его формулы и итоги ещё не посчитаны). Сохранённые значения строки после этого всё равно
+пересчитываются каскадом от нового значения владельца.
 
 ## Проверки
 

@@ -118,7 +118,9 @@ const isChange = (op: RowOp): op is ChangeRowOp => 'id' in op && !isDelete(op);
  * 5. The new rows are evaluated and written (`finishCreateIn`). They are linked by now, so their rollups
  *    over the owner (`agg: first` substitutions) see the owner's STORED values. Accepted limitation: a row
  *    rule depending on an owner value that this same save changes is checked against the owner's previous
- *    value (the cascade afterwards still stores the row values computed from the new owner value).
+ *    value (the cascade afterwards still stores the row values computed from the new owner value). On
+ *    create the owner is stored at version 0 with its raw input, so the rows see that input (the owner's
+ *    formulas and rollups are not computed yet); the cascade afterwards brings the rows up to date.
  * 6. Every changed and new row must end up with one of the field's `target_sets` (`link_target`, with
  *    `field`).
  *

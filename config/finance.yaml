@@ -27,6 +27,7 @@ fields:
   margin: {type: formula, label: Маржа, expr: '{incomes_total} - {expenses_total}'}
 
   # Row fields. Money is a plain number here: the money rounding policy is deferred.
+  # `amount` and `note` are shared by the expense and income sets on purpose (one field, two sets).
   expense_kind: {type: enum, label: Вид расхода, options: [транспортные, комплектующие, накладные, агентские, прочие]}
   amount: {type: number, label: Сумма}
   expense_date: {type: date, label: Дата расхода}
