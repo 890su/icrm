@@ -63,8 +63,9 @@ export class ContactService {
     }
     const { ownerTitle: _ownerTitle, ...identity } = found;
     const owner = (await loadRecords(this.db, [found.ownerId], { workspaceId: this.workspaceId })).get(found.ownerId);
+    // An archived owner no longer answers for its addresses (they are normally archived with it).
+    if (owner === undefined || owner.archivedAt !== null) return { ok: true, identity: null, ...nobody };
     const base = { ok: true, identity, ...nobody } as const;
-    if (owner === undefined) return base;
     const self = { id: owner.id, title: owner.title };
 
     if (owner.sets.has('membership')) {
@@ -85,16 +86,19 @@ export class ContactService {
    */
   async counterpartyOf(contactId: string): Promise<RecordRef | null> {
     const today = todayIn(this.now(), this.cfg.timezone);
-    const active = (await membershipsOf(this.db, this.cfg, this.workspaceId, { contactId }, today)).filter((m) => m.active);
+    const ofContact = (await membershipsOf(this.db, this.cfg, this.workspaceId, { contactId }, today)).filter((m) => m.active);
+    const orgs = await loadRecords(this.db, ofContact.flatMap((m) => m.organizationId ?? []), { workspaceId: this.workspaceId });
+    // Memberships of archived organizations do not count: they are neither the only one nor a rival primary.
+    const active = ofContact.filter((m) => m.organizationId !== null && orgs.get(m.organizationId)?.archivedAt === null);
     const pick = active.length === 1 ? active[0] : active.find((m) => m.isPrimary);
     return pick?.organizationId == null ? null : { id: pick.organizationId, title: pick.organizationTitle ?? '' };
   }
 
-  /** The first record that `fromId` links to through `field`. */
+  /** The first record that `fromId` links to through `field`, unless it is archived. */
   private async linked(fromId: string, field: string): Promise<RecordRef | null> {
     const id = (await linksFrom(this.db, fromId, field))[0];
     if (id === undefined) return null;
     const r = (await loadRecords(this.db, [id], { workspaceId: this.workspaceId })).get(id);
-    return r === undefined ? null : { id: r.id, title: r.title };
+    return r === undefined || r.archivedAt !== null ? null : { id: r.id, title: r.title };
   }
 }

@@ -1,19 +1,20 @@
 import { fileURLToPath } from 'node:url';
 import type { Value } from '@icrm/core';
 import { loadConfigDir } from '@icrm/core/node';
+import type { Kysely } from 'kysely';
 import { beforeAll, expect, test } from 'vitest';
-import { createServices, type RecordView, type SaveResult, type Services } from '../src/index.js';
+import { createServices, type DB, type RecordView, type SaveResult, type Services } from '../src/index.js';
 import { freshDb } from './setup-pg.js';
 
 const CONFIG_DIR = fileURLToPath(new URL('./fixtures/contacts/', import.meta.url));
 const NOW = new Date('2026-10-31T10:00:00Z');
 
 let userId: string;
+let db: Kysely<DB>;
 let svc: Services;
 
 beforeAll(async () => {
   let workspaceId: string;
-  let db;
   ({ db, workspaceId, userId } = await freshDb());
   const cfg = await loadConfigDir(CONFIG_DIR);
   svc = createServices({ db, cfg, workspaceId, now: () => NOW });
@@ -99,4 +100,43 @@ test('counterpartyOf: none, one, several with and without a primary one', async 
   expect(await svcC.counterpartyOf(c.id)).toBeNull();
   await end(mx, '2026-10-02');
   expect(await svcC.counterpartyOf(c.id)).toEqual({ id: y.id, title: 'M-Y' });
+});
+
+test('archived organization is not a counterparty or the organization of a membership', async () => {
+  const c = await person('Arch'); const gone = await firm('Firma Arch');
+  const m = await membership(c, gone);
+  await svc.identities.add({ ownerId: c.id, channel: 'email', address: 'arch@prywatna.pl', userId });
+  await svc.identities.add({ ownerId: m.id, channel: 'phone', address: '+48 603 000 003', userId });
+  await svc.records.archive({ id: gone.id, userId });
+  expect(await svc.contacts.resolveAddress('email', 'arch@prywatna.pl')).toMatchObject({
+    contact: { id: c.id }, organization: null });
+  expect(await svc.contacts.resolveAddress('phone', '603000003')).toMatchObject({
+    contact: { id: c.id }, membership: { id: m.id }, organization: null });
+  expect(await svc.contacts.counterpartyOf(c.id)).toBeNull();
+});
+
+test('a live organization is still the counterparty when the other one is archived', async () => {
+  const c = await person('Arch2'); const gone = await firm('Firma Gone2'); const live = await firm('Firma Live2');
+  await membership(c, gone); await membership(c, live);
+  expect(await svc.contacts.counterpartyOf(c.id)).toBeNull();
+  await svc.records.archive({ id: gone.id, userId });
+  expect(await svc.contacts.counterpartyOf(c.id)).toEqual({ id: live.id, title: 'Firma Live2' });
+});
+
+test('archived contact of a membership is not returned as its contact', async () => {
+  const c = await person('Arch3'); const f = await firm('Firma Arch3');
+  const m = await membership(c, f);
+  await svc.identities.add({ ownerId: m.id, channel: 'phone', address: '+48 604 000 004', userId });
+  await svc.records.archive({ id: c.id, userId });
+  expect(await svc.contacts.resolveAddress('phone', '604000004')).toMatchObject({
+    contact: null, membership: { id: m.id }, organization: { id: f.id } });
+});
+
+test('an address whose owner is archived resolves as not found', async () => {
+  const c = await person('Arch4');
+  await svc.identities.add({ ownerId: c.id, channel: 'email', address: 'arch4@prywatna.pl', userId });
+  // Archived behind the services' back, so that the address is still live.
+  await db.updateTable('records').set({ archived_at: NOW }).where('id', '=', c.id).execute();
+  expect(await svc.contacts.resolveAddress('email', 'arch4@prywatna.pl')).toMatchObject({
+    ok: true, identity: null, contact: null, organization: null });
 });
