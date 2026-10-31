@@ -140,3 +140,24 @@ test('an address whose owner is archived resolves as not found', async () => {
   expect(await svc.contacts.resolveAddress('email', 'arch4@prywatna.pl')).toMatchObject({
     ok: true, identity: null, contact: null, organization: null });
 });
+
+test('an email whose owner is archived gets the domain hints of an unknown one', async () => {
+  const firmaK = await firm('Firma K', { email_domains: ['firma-k.pl'] });
+  const c = await person('Arch5');
+  await svc.identities.add({ ownerId: c.id, channel: 'email', address: 'arch5@firma-k.pl', userId });
+  await db.updateTable('records').set({ archived_at: NOW }).where('id', '=', c.id).execute();
+  expect(await svc.contacts.resolveAddress('email', 'arch5@firma-k.pl')).toEqual({
+    ok: true, identity: null, contact: null, membership: null, organization: null, membershipEnded: false,
+    hints: [{ id: firmaK.id, title: 'Firma K' }] });
+});
+
+test('an owner that is neither a contact, a membership nor an organization resolves as not found', async () => {
+  const firmaL = await firm('Firma L', { email_domains: ['firma-l.pl'] });
+  const o = await firm('Firma Lost');
+  await svc.identities.add({ ownerId: o.id, channel: 'email', address: 'biuro@firma-l.pl', userId });
+  // The set is dropped behind the services' back, so that the address is still live.
+  await db.deleteFrom('record_sets').where('record_id', '=', o.id).where('set_key', '=', 'organization').execute();
+  expect(await svc.contacts.resolveAddress('email', 'biuro@firma-l.pl')).toEqual({
+    ok: true, identity: null, contact: null, membership: null, organization: null, membershipEnded: false,
+    hints: [{ id: firmaL.id, title: 'Firma L' }] });
+});

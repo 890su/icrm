@@ -54,7 +54,8 @@ export class ContactService {
   /**
    * Finds who owns a channel address (spec 2a §4). An unreadable address is `invalid_address` without a
    * search; an unknown one has no owner, and an email gets `hints`: the live organizations that list its
-   * domain in `email_domains`.
+   * domain in `email_domains`. An address whose owner is archived, or is neither a membership, a contact nor
+   * an organization, is unknown in the same way.
    */
   async resolveAddress(channel: string, address: string): Promise<ResolveResult> {
     const ch = identityChannel(channel);
@@ -64,15 +65,16 @@ export class ContactService {
 
     const found = await liveByAddress(this.db, this.workspaceId, ch, n.normalized);
     const nobody = { contact: null, membership: null, organization: null, membershipEnded: false, hints: [] };
-    if (found === undefined) {
+    const unknown = async (): Promise<ResolveResult> => {
       const hints = ch === 'email'
         ? await organizationsByEmailDomain(this.db, this.workspaceId, emailDomainOf(n.normalized)) : [];
       return { ok: true, identity: null, ...nobody, hints };
-    }
+    };
+    if (found === undefined) return unknown();
     const { ownerTitle: _ownerTitle, ...identity } = found;
     const owner = (await loadRecords(this.db, [found.ownerId], { workspaceId: this.workspaceId })).get(found.ownerId);
     // An archived owner no longer answers for its addresses (they are normally archived with it).
-    if (owner === undefined || owner.archivedAt !== null) return { ok: true, identity: null, ...nobody };
+    if (owner === undefined || owner.archivedAt !== null) return unknown();
     const base = { ok: true, identity, ...nobody } as const;
     const self = { id: owner.id, title: owner.title };
 
@@ -85,7 +87,8 @@ export class ContactService {
       };
     }
     if (owner.sets.has('contact')) return { ...base, contact: self, organization: await this.counterpartyOf(owner.id) };
-    return { ...base, organization: self };
+    if (owner.sets.has('organization')) return { ...base, organization: self };
+    return unknown();
   }
 
   /**
