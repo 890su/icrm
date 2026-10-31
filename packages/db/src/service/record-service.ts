@@ -2,7 +2,7 @@ import {
   fieldStatesOf, ownedFieldsOf, readonlyErrors,
   type CompiledConfig, type EvalResult, type FieldState, type RecordError, type RecordState, type Value,
 } from '@icrm/core';
-import { sql, type Kysely, type Transaction } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import { uuidv7 } from 'uuidv7';
 import { appendChangeLog, type ChangeEntry } from '../repo/change-log.js';
 import { ancestorsVia, linksFrom, replaceLinks } from '../repo/links.js';
@@ -13,7 +13,8 @@ import {
   archiveSeeds, CASCADE_LIMIT, cascadeLimitError, changedSetKeys, evaluateWithRollups, recompute, runCascade,
   type CascadeBudget, type CascadeSeed,
 } from './cascade.js';
-import { archived, notFound, recordError, SaveFailed, versionConflict } from './errors.js';
+import { behaviorsOf, type BehaviorContext, type SetBehavior } from './behaviors.js';
+import { archived, notFound, recordError, SaveFailed, uniqueViolation, versionConflict } from './errors.js';
 import { fieldInEnabledSet, sameValue } from './fields.js';
 import { withRetry } from './retry.js';
 import { noRows, requireTargetSet, saveRows, type RowOp, type RowSteps } from './rows.js';
@@ -64,6 +65,8 @@ export interface CreateInput {
   links?: Record<string, string[]>;
   /** Rows per owned link field of the sets given in `sets` (spec §1.12, `saveRows`). */
   rows?: Record<string, RowOp[]>;
+  /** A save by the system itself: may set `managed` fields (in `data` and `links`). */
+  system?: boolean;
 }
 
 export interface SetLinksInput {
@@ -71,6 +74,8 @@ export interface SetLinksInput {
   userId: string;
   field: string;
   targetIds: string[];
+  /** A save by the system itself: `field` may be `managed`. */
+  system?: boolean;
 }
 
 export interface ArchiveInput {
@@ -90,6 +95,30 @@ export interface UpdateInput {
   disableSets?: string[];
   /** Rows per owned link field of the stored sets plus `enableSets` (spec §1.12, `saveRows`). */
   rows?: Record<string, RowOp[]>;
+  /** A save by the system itself: may set `managed` fields in `data`. */
+  system?: boolean;
+}
+
+/**
+ * The saves of one `transaction`: each checks, locks and logs like the public method of its name, but does
+ * not cascade, and returns the record as stored right after its write. Run them one at a time.
+ */
+export interface TxOps {
+  readonly tx: Db;
+  create(i: CreateInput): Promise<StoredRecord>;
+  update(i: UpdateInput): Promise<StoredRecord>;
+  setLinks(i: SetLinksInput): Promise<StoredRecord>;
+  archive(i: ArchiveInput): Promise<StoredRecord>;
+  /** The view of record `id` of this workspace as it is now in the transaction (`not_found` otherwise). */
+  view(id: string): Promise<RecordView>;
+}
+
+export type TxResult<T> = { ok: true; value: T } | { ok: false; errors: RecordError[] };
+
+/** What the ops of one transaction collect for its one cascade. */
+interface TxAcc {
+  seeds: CascadeSeed[];
+  budget: CascadeBudget;
 }
 
 /** A record `insertIn` inserted (version 0) and `finishCreateIn` has yet to evaluate. */
@@ -116,7 +145,12 @@ const stateOf = (r: StoredRecord): RecordState => ({ data: { ...r.data, title: r
  * The save pipeline: every create/update of a record goes through here, in one transaction.
  * Any error rolls the whole transaction back and comes back as `{ok: false, errors}`. A transaction that
  * Postgres aborts as a deadlock victim or serialization failure is re-run from scratch (`withRetry`);
- * after the last attempt that error is thrown.
+ * after the last attempt that error is thrown. A unique violation of a constraint in `UNIQUE_ERRORS` comes
+ * back as its error. Several saves can share one transaction and one cascade (`transaction`).
+ *
+ * Behaviours of sets (`SetBehavior`) hook into every save: `beforeEvaluate` in `finishCreateIn` and
+ * `finishUpdateIn` (so rows get them too), `afterWrite` at the end of `persist`, `archived` at the end of
+ * `archiveIn`, `extendView` in `view`. Fields marked `managed` are only set by saves with `system: true`.
  */
 export class RecordService {
   private readonly db: Kysely<DB>;
@@ -124,14 +158,19 @@ export class RecordService {
   private readonly workspaceId: string;
   private readonly now: () => Date;
   private readonly cascadeLimit: number;
+  private readonly behaviors: readonly SetBehavior[];
 
-  /** `cascadeLimit` (default `CASCADE_LIMIT`) is the cascade limit of one save; tests lower it. */
-  constructor(o: { db: Kysely<DB>; cfg: CompiledConfig; workspaceId: string; now?: () => Date; cascadeLimit?: number }) {
+  /** `cascadeLimit` (default `CASCADE_LIMIT`) is the cascade limit of one transaction; tests lower it. */
+  constructor(o: {
+    db: Kysely<DB>; cfg: CompiledConfig; workspaceId: string; now?: () => Date; cascadeLimit?: number;
+    behaviors?: SetBehavior[];
+  }) {
     this.db = o.db;
     this.cfg = o.cfg;
     this.workspaceId = o.workspaceId;
     this.now = o.now ?? (() => new Date());
     this.cascadeLimit = o.cascadeLimit ?? CASCADE_LIMIT;
+    this.behaviors = o.behaviors ?? [];
   }
 
   async get(id: string): Promise<RecordView | null> {
@@ -146,17 +185,7 @@ export class RecordService {
    * over the rows and the owner follows.
    */
   create(i: CreateInput): Promise<SaveResult> {
-    return this.inTransaction(async (tx) => {
-      const inserted = await this.insertIn(tx, i);
-      const batch = i.rows === undefined
-        ? noRows()
-        : await saveRows(this.rowSteps(), tx, {
-          id: inserted.id, userId: i.userId, sets: inserted.sets, prev: null,
-        }, i.rows);
-      const { seed } = await this.finishCreateIn(tx, i.userId, inserted, batch.changedLinks);
-      await this.cascade(tx, i.userId, [...batch.seeds, seed], batch.budget);
-      return this.reload(tx, inserted.id);
-    });
+    return this.save(i.userId, (ops) => ops.create(i));
   }
 
   /**
@@ -168,20 +197,7 @@ export class RecordService {
    * of its owned field (`link_target`, with that field), as a change op of its owner's batch must.
    */
   update(i: UpdateInput): Promise<SaveResult> {
-    return this.inTransaction(async (tx) => {
-      const { stored } = await this.lockWithOwner(tx, i.id, i.expectedVersion);
-      const prepared = this.prepareUpdate(i, stored);
-      const batch = i.rows === undefined
-        ? noRows()
-        : await saveRows(this.rowSteps(), tx, {
-          id: i.id, userId: i.userId, sets: prepared.sets, prev: prepared.prev,
-        }, i.rows);
-      const { seed, sets } = await this.finishUpdateIn(tx, i, stored, prepared, batch.changedLinks);
-      // A live row keeps one of its field's target sets (spec §1.12), as in its owner's batch.
-      if (stored.ownerField !== null) requireTargetSet(this.cfg, stored.ownerField, sets);
-      await this.cascade(tx, i.userId, [...batch.seeds, seed], batch.budget);
-      return this.reload(tx, i.id);
-    });
+    return this.save(i.userId, (ops) => ops.update(i));
   }
 
   /**
@@ -196,32 +212,7 @@ export class RecordService {
    * their own rows, as by a `delete` op. A row is locked after its owner (`lockWithOwner`).
    */
   setLinks(i: SetLinksInput): Promise<SaveResult> {
-    return this.inTransaction(async (tx) => {
-      // Before any row lock: the holder of the hierarchy lock may cascade into rows other savers lock.
-      await this.lockHierarchies(tx, [i.field]);
-      const { stored } = await this.lockWithOwner(tx, i.id);
-      const errors = await this.linkErrors(tx, i.id, stored.sets, i.field, i.targetIds);
-      if (errors.length > 0) throw new SaveFailed(errors);
-
-      const seeds: CascadeSeed[] = [];
-      const budget: CascadeBudget = { spent: 0 };
-      if (this.cfg.fields.get(i.field)!.owned === true) {
-        const kept = new Set(i.targetIds);
-        const dropped = (await linksFrom(tx, i.id, i.field)).filter((id) => !kept.has(id));
-        const rows = await loadRecords(tx, dropped, { forUpdate: true, workspaceId: this.workspaceId });
-        for (const row of rows.values()) {
-          if (row.archivedAt === null) seeds.push(...await this.archiveIn(tx, row, i.userId, budget));
-        }
-      }
-      const change = await this.replaceLinksLogged(tx, i.id, i.userId, i.field, i.targetIds);
-      if (change === null) return this.view(tx, stored);
-
-      const readonly = readonlyErrors(this.cfg, stateOf(stored), new Set([i.field]), this.now());
-      if (readonly.length > 0) throw new SaveFailed(readonly);
-      seeds.push(await this.relinkedIn(tx, stored, i.userId, change));
-      await this.cascade(tx, i.userId, seeds, budget);
-      return this.reload(tx, i.id);
-    });
+    return this.save(i.userId, (ops) => ops.setLinks(i));
   }
 
   /**
@@ -236,25 +227,136 @@ export class RecordService {
    * itself is always allowed.
    */
   archive(i: ArchiveInput): Promise<SaveResult> {
-    return this.inTransaction(async (tx) => {
-      const { stored, owner } = await this.lockWithOwner(tx, i.id);
-      if (owner !== undefined && stored.ownerField !== null) {
-        // A readonly owned field (judged by the owner's stored state) freezes its membership.
-        const readonly = readonlyErrors(this.cfg, stateOf(owner), new Set([stored.ownerField]), this.now());
-        if (readonly.length > 0) throw new SaveFailed(readonly);
-      }
+    return this.save(i.userId, (ops) => ops.archive(i));
+  }
 
-      const budget: CascadeBudget = { spent: 0 };
-      const seeds = await this.archiveIn(tx, stored, i.userId, budget);
-      if (owner !== undefined && stored.ownerField !== null) {
-        const field = stored.ownerField;
-        const rest = (await linksFrom(tx, owner.id, field)).filter((id) => id !== i.id);
-        const change = await this.replaceLinksLogged(tx, owner.id, i.userId, field, rest);
-        if (change !== null) seeds.push(await this.relinkedIn(tx, owner, i.userId, change));
+  /**
+   * Runs `work` in one transaction. Its `ops` save like the public methods (same checks, locks, logs and
+   * behaviours) but do not cascade: the seeds and cascade budget of every op are collected, and ONE cascade
+   * over them runs after `work`, before commit (the cascade limit is the transaction's). Any error (of an
+   * op, a behaviour, the cascade) rolls everything back and comes back as `{ok: false, errors}`; `work`
+   * must not catch an op's error and go on. A deadlock or serialization failure re-runs `work` from scratch
+   * (`withRetry`), so `work` must have no effects outside the transaction.
+   */
+  transaction<T>(userId: string, work: (ops: TxOps) => Promise<T>): Promise<TxResult<T>> {
+    return this.run(userId, work, async (_tx, value) => value);
+  }
+
+  private async save(userId: string, op: (ops: TxOps) => Promise<StoredRecord>): Promise<SaveResult> {
+    const res = await this.run(userId, op, (tx, rec) => this.reload(tx, rec.id));
+    return res.ok ? { ok: true, record: res.value } : res;
+  }
+
+  /** `transaction`, then `finish` on `work`'s value inside the transaction, after the cascade. */
+  private async run<T, R>(
+    userId: string, work: (ops: TxOps) => Promise<T>, finish: (tx: Db, value: T) => Promise<R>,
+  ): Promise<TxResult<R>> {
+    try {
+      const value = await withRetry(() => this.db.transaction().execute(async (tx) => {
+        const acc: TxAcc = { seeds: [], budget: { spent: 0 } };
+        const done = await work(this.opsIn(tx, acc));
+        await this.cascade(tx, userId, acc.seeds, acc.budget);
+        return finish(tx, done);
+      }));
+      return { ok: true, value };
+    } catch (e) {
+      if (e instanceof SaveFailed) return { ok: false, errors: e.errors };
+      const unique = uniqueViolation(e);
+      if (unique !== null) return { ok: false, errors: [unique] };
+      throw e;
+    }
+  }
+
+  private opsIn(tx: Db, acc: TxAcc): TxOps {
+    return {
+      tx,
+      create: (i) => this.createOp(tx, acc, i),
+      update: (i) => this.updateOp(tx, acc, i),
+      setLinks: (i) => this.setLinksOp(tx, acc, i),
+      archive: (i) => this.archiveOp(tx, acc, i),
+      view: async (id) => {
+        const rec = (await loadRecords(tx, [id], { workspaceId: this.workspaceId })).get(id);
+        if (rec === undefined) throw new SaveFailed([notFound(id)]);
+        return this.view(tx, rec);
+      },
+    };
+  }
+
+  /** Adds an op's seeds and spent budget to its transaction's; past the cascade limit the save fails. */
+  private collect(acc: TxAcc, seeds: CascadeSeed[], spent = 0): void {
+    acc.seeds.push(...seeds);
+    acc.budget.spent += spent;
+    if (acc.budget.spent > this.cascadeLimit) throw new SaveFailed([cascadeLimitError()]);
+  }
+
+  private async createOp(tx: Db, acc: TxAcc, i: CreateInput): Promise<StoredRecord> {
+    const inserted = await this.insertIn(tx, i);
+    const batch = i.rows === undefined
+      ? noRows()
+      : await saveRows(this.rowSteps(), tx, { id: inserted.id, userId: i.userId, sets: inserted.sets, prev: null }, i.rows);
+    const { seed } = await this.finishCreateIn(tx, i.userId, inserted, batch.changedLinks);
+    this.collect(acc, [...batch.seeds, seed], batch.budget.spent);
+    return this.storedIn(tx, inserted.id);
+  }
+
+  private async updateOp(tx: Db, acc: TxAcc, i: UpdateInput): Promise<StoredRecord> {
+    const { stored } = await this.lockWithOwner(tx, i.id, i.expectedVersion);
+    const prepared = this.prepareUpdate(i, stored);
+    const batch = i.rows === undefined
+      ? noRows()
+      : await saveRows(this.rowSteps(), tx, { id: i.id, userId: i.userId, sets: prepared.sets, prev: prepared.prev }, i.rows);
+    const { seed, sets } = await this.finishUpdateIn(tx, i, stored, prepared, batch.changedLinks);
+    // A live row keeps one of its field's target sets (spec §1.12), as in its owner's batch.
+    if (stored.ownerField !== null) requireTargetSet(this.cfg, stored.ownerField, sets);
+    this.collect(acc, [...batch.seeds, seed], batch.budget.spent);
+    return this.storedIn(tx, i.id);
+  }
+
+  private async setLinksOp(tx: Db, acc: TxAcc, i: SetLinksInput): Promise<StoredRecord> {
+    const managed = this.managedErrors([i.field], i.system);
+    if (managed.length > 0) throw new SaveFailed(managed);
+    // Before any row lock: the holder of the hierarchy lock may cascade into rows other savers lock.
+    await this.lockHierarchies(tx, [i.field]);
+    const { stored } = await this.lockWithOwner(tx, i.id);
+    const errors = await this.linkErrors(tx, i.id, stored.sets, i.field, i.targetIds);
+    if (errors.length > 0) throw new SaveFailed(errors);
+
+    const seeds: CascadeSeed[] = [];
+    if (this.cfg.fields.get(i.field)!.owned === true) {
+      const kept = new Set(i.targetIds);
+      const dropped = (await linksFrom(tx, i.id, i.field)).filter((id) => !kept.has(id));
+      const rows = await loadRecords(tx, dropped, { forUpdate: true, workspaceId: this.workspaceId });
+      for (const row of rows.values()) {
+        if (row.archivedAt === null) seeds.push(...await this.archiveIn(tx, row, i.userId, acc.budget));
       }
-      await this.cascade(tx, i.userId, seeds, budget);
-      return this.reload(tx, i.id);
-    });
+    }
+    const change = await this.replaceLinksLogged(tx, i.id, i.userId, i.field, i.targetIds);
+    if (change !== null) {
+      const readonly = readonlyErrors(this.cfg, stateOf(stored), new Set([i.field]), this.now());
+      if (readonly.length > 0) throw new SaveFailed(readonly);
+      seeds.push(await this.relinkedIn(tx, stored, i.userId, change));
+    }
+    this.collect(acc, seeds);
+    return change === null ? stored : this.storedIn(tx, i.id);
+  }
+
+  private async archiveOp(tx: Db, acc: TxAcc, i: ArchiveInput): Promise<StoredRecord> {
+    const { stored, owner } = await this.lockWithOwner(tx, i.id);
+    if (owner !== undefined && stored.ownerField !== null) {
+      // A readonly owned field (judged by the owner's stored state) freezes its membership.
+      const readonly = readonlyErrors(this.cfg, stateOf(owner), new Set([stored.ownerField]), this.now());
+      if (readonly.length > 0) throw new SaveFailed(readonly);
+    }
+
+    const seeds = await this.archiveIn(tx, stored, i.userId, acc.budget);
+    if (owner !== undefined && stored.ownerField !== null) {
+      const field = stored.ownerField;
+      const rest = (await linksFrom(tx, owner.id, field)).filter((id) => id !== i.id);
+      const change = await this.replaceLinksLogged(tx, owner.id, i.userId, field, rest);
+      if (change !== null) seeds.push(await this.relinkedIn(tx, owner, i.userId, change));
+    }
+    this.collect(acc, seeds);
+    return this.storedIn(tx, i.id);
   }
 
   /**
@@ -348,7 +450,7 @@ export class RecordService {
    */
   private async insertIn(tx: Db, i: CreateInput, owner?: { id: string; field: string }): Promise<Inserted> {
     const id = uuidv7();
-    const errors: RecordError[] = [];
+    const errors = this.managedErrors([...Object.keys(i.data ?? {}), ...Object.keys(i.links ?? {})], i.system);
     const sets = new Map<string, string>();
     this.enableManualSets(sets, i.sets ?? [], errors);
     const input = this.knownInput({ ...i.data, title: i.title }, null, errors);
@@ -377,6 +479,7 @@ export class RecordService {
   private async finishCreateIn(
     tx: Db, userId: string, ins: Inserted, moreLinks: LinkChange[],
   ): Promise<{ seed: CascadeSeed; sets: Map<string, string> }> {
+    await this.beforeEvaluate(tx, userId, { id: ins.id, prev: null, input: ins.input, sets: ins.sets });
     const userChangedKeys = new Set(Object.keys(ins.input));
     const next: RecordState = { data: ins.input, sets: new Map(ins.sets) };
     const res = await this.evaluate(tx, ins.id, null, next, userChangedKeys);
@@ -403,7 +506,7 @@ export class RecordService {
   /** First half of `updateIn`: checks the set switches and the input; `sets` are the sets before evaluation. */
   private prepareUpdate(i: UpdateInput, stored: StoredRecord): PreparedUpdate {
     const prev = stateOf(stored);
-    const errors: RecordError[] = [];
+    const errors = this.managedErrors(Object.keys(i.data ?? {}), i.system);
     const sets = new Map(prev.sets);
     this.enableManualSets(sets, i.enableSets ?? [], errors);
     this.disableManualSets(sets, i.disableSets ?? [], errors);
@@ -421,6 +524,7 @@ export class RecordService {
     tx: Db, i: UpdateInput, stored: StoredRecord, p: PreparedUpdate, moreLinks: LinkChange[],
   ): Promise<{ seed: CascadeSeed; sets: Map<string, string> }> {
     const { prev, input } = p;
+    await this.beforeEvaluate(tx, i.userId, { id: i.id, prev, input, sets: p.sets });
     const userChangedKeys = new Set(Object.keys(input).filter((k) => !sameValue(prev.data[k], input[k])));
     const next: RecordState = { data: { ...prev.data, ...input }, sets: p.sets };
     const res = await this.evaluate(tx, i.id, prev, next, userChangedKeys);
@@ -436,8 +540,8 @@ export class RecordService {
    * Archives `stored` (locked, not archived; version bump, `archive` entry logged `user`) and then the
    * non-archived rows it owns, recursively, level by level: each level is locked in id order after its
    * owners (already locked), archived and logged `cascade`. Those rows count against the cascade limit in
-   * `budget` (exceeding it fails the save). Links stay. Returns the seeds (`archiveSeeds`) of every record
-   * it archived.
+   * `budget` (exceeding it fails the save). Links stay. Then the `archived` behaviours get the archived
+   * records of their set. Returns the seeds (`archiveSeeds`) of every record it archived.
    */
   private async archiveIn(tx: Db, stored: StoredRecord, userId: string, budget: CascadeBudget): Promise<CascadeSeed[]> {
     const archivedAt = this.now();
@@ -466,6 +570,15 @@ export class RecordService {
     }
     const seeds: CascadeSeed[] = [];
     for (const id of done) seeds.push(...await archiveSeeds(tx, this.cfg, id));
+    const hooks = this.behaviors.filter((b) => b.archived !== undefined);
+    if (hooks.length > 0) {
+      const recs = await loadRecords(tx, done);
+      const all = done.map((id) => recs.get(id)!);
+      for (const b of hooks) {
+        const had = all.filter((r) => r.sets.has(b.set));
+        if (had.length > 0) await b.archived!(this.ctx(tx, userId), had);
+      }
+    }
     return seeds;
   }
 
@@ -502,7 +615,8 @@ export class RecordService {
   /**
    * Writes the evaluated state of `stored` (version check against `expectedVersion`, then bump), its set
    * changes and the change log of a user save; a lost version race is a `version_conflict`. The one place
-   * where "write, sets, log" happens for user saves.
+   * where "write, sets, log" happens for user saves; then the `afterWrite` behaviours of the evaluated sets
+   * run on the written record.
    */
   private async persist(
     tx: Db, stored: StoredRecord, prev: RecordState | null, res: EvalResult, userId: string,
@@ -512,6 +626,40 @@ export class RecordService {
     if (!written) throw new SaveFailed([versionConflict(stored.id)]);
     await writeSets(tx, stored.id, stored.sets, res.state.sets);
     await appendChangeLog(tx, this.changeEntries(stored.id, userId, prev, res, userChangedKeys));
+
+    const hooks = behaviorsOf(this.behaviors, res.state.sets).filter((b) => b.afterWrite !== undefined);
+    if (hooks.length === 0) return;
+    const record = await this.storedIn(tx, stored.id);
+    const errors: RecordError[] = [];
+    for (const b of hooks) errors.push(...await b.afterWrite!(this.ctx(tx, userId), { record, prev }));
+    if (errors.length > 0) throw new SaveFailed(errors);
+  }
+
+  /** Runs the `beforeEvaluate` behaviours of `r.sets` (they may change `r.input`); their errors fail the save. */
+  private async beforeEvaluate(
+    tx: Db, userId: string,
+    r: { id: string; prev: RecordState | null; input: Record<string, Value>; sets: Map<string, string> },
+  ): Promise<void> {
+    const errors: RecordError[] = [];
+    for (const b of behaviorsOf(this.behaviors, r.sets)) {
+      if (b.beforeEvaluate !== undefined) errors.push(...await b.beforeEvaluate(this.ctx(tx, userId), r));
+    }
+    if (errors.length > 0) throw new SaveFailed(errors);
+  }
+
+  private ctx(tx: Db, userId: string): BehaviorContext {
+    return { tx, cfg: this.cfg, workspaceId: this.workspaceId, now: this.now(), userId };
+  }
+
+  /** `managed_field` for each of `keys` that is a `managed` field, unless the save is the system's. */
+  private managedErrors(keys: string[], system: boolean | undefined): RecordError[] {
+    if (system === true) return [];
+    return keys.flatMap((key) => {
+      const def = this.cfg.fields.get(key);
+      return def?.managed === true
+        ? [recordError('managed_field', `Поле «${def.label}» заполняется системой`, { field: key })]
+        : [];
+    });
   }
 
   /**
@@ -571,15 +719,6 @@ export class RecordService {
       old: before, new: after, source: 'user',
     }]);
     return { field, otherIds: [...new Set([...before, ...after])] };
-  }
-
-  private async inTransaction(work: (tx: Transaction<DB>) => Promise<RecordView>): Promise<SaveResult> {
-    try {
-      return { ok: true, record: await withRetry(() => this.db.transaction().execute(work)) };
-    } catch (e) {
-      if (e instanceof SaveFailed) return { ok: false, errors: e.errors };
-      throw e;
-    }
   }
 
   /**
@@ -697,12 +836,20 @@ export class RecordService {
   }
 
   private async reload(tx: Db, id: string): Promise<RecordView> {
-    const rec = (await loadRecords(tx, [id])).get(id);
-    if (rec === undefined) throw new Error(`record ${id} vanished inside its own save`);
-    return this.view(tx, rec);
+    return this.view(tx, await this.storedIn(tx, id));
   }
 
-  /** The record's view; `withRows: false` (for a row inside its owner) leaves out `rows`. */
+  /** Record `id` as stored now in `tx`, which saved it. */
+  private async storedIn(tx: Db, id: string): Promise<StoredRecord> {
+    const rec = (await loadRecords(tx, [id])).get(id);
+    if (rec === undefined) throw new Error(`record ${id} vanished inside its own save`);
+    return rec;
+  }
+
+  /**
+   * The record's view; `withRows: false` (for a row inside its owner) leaves out `rows` and the
+   * `extendView` behaviours.
+   */
   private async view(tx: Db, rec: StoredRecord, withRows = true): Promise<RecordView> {
     const links: Record<string, string[]> = {};
     for (const set of rec.sets.keys()) {
@@ -730,6 +877,7 @@ export class RecordService {
     if (withRows) {
       const rows = await this.rowsOf(tx, rec, links);
       if (rows !== undefined) view.rows = rows;
+      for (const b of behaviorsOf(this.behaviors, rec.sets)) await b.extendView?.(tx, rec, view);
     }
     return view;
   }

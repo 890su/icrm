@@ -10,8 +10,10 @@ export { ancestorsVia, linksFrom, linksTo, replaceLinks } from './repo/links.js'
 export { appendChangeLog, type ChangeEntry } from './repo/change-log.js';
 export {
   RecordService, type ArchiveInput, type CreateInput, type RecomputeError, type RecordView, type RowView, type SaveResult,
-  type SetLinksInput, type UpdateInput,
+  type SetLinksInput, type TxOps, type TxResult, type UpdateInput,
 } from './service/record-service.js';
+export type { BehaviorContext, SetBehavior } from './service/behaviors.js';
+export { UNIQUE_ERRORS, uniqueViolation } from './service/errors.js';
 export { isRetryable } from './service/retry.js';
 export type { ChangeRowOp, DeleteRowOp, NewRowOp, RowOp } from './service/rows.js';
 export {

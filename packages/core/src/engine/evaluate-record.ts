@@ -19,7 +19,10 @@ export interface FieldState {
 
 export type ErrorCode = 'invalid_value' | 'invalid_option' | 'required' | 'validation' | 'readonly' | 'oscillation'
   | 'set_activation' | 'set_required_by' | 'unknown_set' | 'unknown_field' | 'link_target' | 'link_cardinality' | 'link_cycle'
-  | 'link_owned' | 'version_conflict' | 'not_found' | 'archived';
+  | 'link_owned' | 'version_conflict' | 'not_found' | 'archived'
+  | 'managed_field' | 'invalid_address' | 'identity_taken' | 'invalid_owner' | 'nip_invalid' | 'nip_taken'
+  | 'public_domain' | 'membership_active_exists' | 'primary_conflict' | 'membership_ended'
+  | 'handover_target_invalid' | 'merge_kind_mismatch' | 'merge_self' | 'merge_archived';
 
 export interface RecordError {
   field?: string;
@@ -28,6 +31,11 @@ export interface RecordError {
   message: string;
   /** Set when the error comes from a row of an owned link field (0-based index in that field). */
   row?: { field: string; index: number };
+  /** The record the error is about, when it is another record than the one saved (e.g. the holder of an identity). */
+  recordId?: string;
+  /** The owner of `recordId`, when that record is owned by another one (e.g. a contact of an organization). */
+  ownerId?: string;
+  ownerTitle?: string;
 }
 
 export interface EvalResult {
