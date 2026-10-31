@@ -255,3 +255,25 @@ describe('fieldStatesOf', () => {
     expect(s.get('kind')!.options).toEqual(['visit', 'montage', 'consult']);
   });
 });
+
+describe('link fields in require', () => {
+  const c = compile(`fields:
+  done: {type: bool, label: Готово}
+  conversation: {type: link, label: Разговор, target_sets: [conv]}
+sets:
+  task: {label: Задача, fields: [title, done, conversation]}
+  conv: {label: Разговор, fields: [title]}
+rules:
+  - {id: conv_on_done, when: '{done}', require: [conversation]}`);
+  const ev = (linkedKeys?: Set<string>) => evaluateRecord(c, null, plain({ done: true }, { task: 'manual' }),
+    { now, userChangedKeys: new Set(['done']), linkedKeys });
+
+  test('a required link field without links is a required error', () => {
+    expect(ev().errors).toEqual([expect.objectContaining({ code: 'required', field: 'conversation', rule_id: 'conv_on_done' })]);
+    expect(ev(new Set(['other'])).errors).toEqual([expect.objectContaining({ code: 'required', field: 'conversation' })]);
+  });
+
+  test('a required link field with at least one link is satisfied', () => {
+    expect(ev(new Set(['conversation'])).errors).toEqual([]);
+  });
+});

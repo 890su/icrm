@@ -42,6 +42,11 @@ export interface EvalOptions {
   now: Date;
   /** Keys the user wrote in this save; only these get type/option and readonly checks. */
   userChangedKeys: Set<string>;
+  /**
+   * Link field keys that currently have at least one link. Links live outside `data`, so this is how
+   * `require` sees a link field as filled. Absent = no link field is filled.
+   */
+  linkedKeys?: Set<string>;
 }
 
 /** Spec §1.8: at most this many stabilization passes. */
@@ -233,7 +238,11 @@ function userValueErrors(
   return errors;
 }
 
-function readonlyErrors(cfg: CompiledConfig, prev: RecordState, keys: Set<string>, now: Date): RecordError[] {
+/**
+ * `readonly` errors for changing `keys` (values or link fields) of a record, judged by its previous
+ * state `prev`, as the rules active in `prev` make them.
+ */
+export function readonlyErrors(cfg: CompiledConfig, prev: RecordState, keys: Set<string>, now: Date): RecordError[] {
   const states = fieldStatesOf(cfg, prev, now);
   const active = activeRulesOf(cfg, prev, now);
   return [...keys].filter((k) => states.get(k)?.readonly === true).map((key) => ({
@@ -246,12 +255,15 @@ function readonlyErrors(cfg: CompiledConfig, prev: RecordState, keys: Set<string
 
 function ruleErrors(
   cfg: CompiledConfig, s: RecordState, active: CompiledRule[], states: Map<string, FieldState>, now: Date,
+  linkedKeys: ReadonlySet<string>,
 ): RecordError[] {
   const errors: RecordError[] = [];
   const reported = new Set<string>();
+  const filled = (key: string): boolean =>
+    cfg.fields.get(key)?.type === 'link' ? linkedKeys.has(key) : !isEmpty(get(s.data, key));
   for (const r of active) {
     for (const key of r.require ?? []) {
-      if (reported.has(key) || states.get(key)?.visible !== true || !isEmpty(get(s.data, key))) continue;
+      if (reported.has(key) || states.get(key)?.visible !== true || filled(key)) continue;
       reported.add(key);
       errors.push({ field: key, rule_id: r.id, code: 'required', message: `Поле «${cfg.fields.get(key)!.label}» обязательно` });
     }
@@ -274,6 +286,7 @@ export function evaluateRecord(
   cfg: CompiledConfig, prev: RecordState | null, next: RecordState, opts: EvalOptions,
 ): EvalResult {
   const { now, userChangedKeys } = opts;
+  const linkedKeys = opts.linkedKeys ?? new Set<string>();
   const s: RecordState = { data: { ...next.data }, sets: new Map(next.sets) };
   const history: Set<string>[] = [];
   // A rule "fires" when it was inactive in `prev` (every rule on create) or in an earlier pass of this
@@ -302,7 +315,7 @@ export function evaluateRecord(
     ...(stable ? [] : oscillationErrors(history)),
     ...userValueErrors(cfg, s.data, userChangedKeys, fieldStates),
     ...(prev === null ? [] : readonlyErrors(cfg, prev, userChangedKeys, now)),
-    ...ruleErrors(cfg, s, active, fieldStates, now),
+    ...ruleErrors(cfg, s, active, fieldStates, now, linkedKeys),
   ];
 
   return {

@@ -4,7 +4,7 @@ import {
   type Value,
 } from '@icrm/core';
 import { appendChangeLog, type ChangeEntry } from '../repo/change-log.js';
-import { linksFrom, linksTo } from '../repo/links.js';
+import { linkedFields, linksFrom, linksTo } from '../repo/links.js';
 import { loadRecords, writeRecord, writeSets, type StoredRecord } from '../repo/records.js';
 import type { Db } from '../repo/types.js';
 
@@ -99,7 +99,8 @@ export async function refreshOwnRollups(tx: Db, cfg: CompiledConfig, rec: Rollup
 }
 
 /**
- * `evaluateRecord` with the record's own rollups current. Exactly the rollups of the sets enabled in the
+ * `evaluateRecord` with the record's own rollups current and its stored links as link presence (so a rule's
+ * `require` on a link field sees links written earlier in the same transaction). Exactly the rollups of the sets enabled in the
  * FINAL evaluated state are recomputed; every other rollup keeps its value from `next` (the stored one),
  * as fields of disabled sets are not touched. Starting from the sets of `next`, the record is evaluated
  * again (always from `next`) while the rules change which rollups are enabled, at most
@@ -109,12 +110,13 @@ export async function evaluateWithRollups(
   tx: Db, cfg: CompiledConfig, id: string, prev: RecordState | null, next: RecordState, opts: EvalOptions,
 ): Promise<EvalResult> {
   const cache = newCache();
+  const evalOpts: EvalOptions = { ...opts, linkedKeys: opts.linkedKeys ?? await linkedFields(tx, id) };
   let keys = rollupsIn(cfg, next.sets);
   for (let round = 1; ; round++) {
     const values = await ownRollupValues(tx, cfg, id, keys, opts.now, cache);
     const data = { ...next.data };
     for (const key of keys) data[key] = values.get(key) ?? null;
-    const res = evaluateRecord(cfg, prev, { data, sets: next.sets }, opts);
+    const res = evaluateRecord(cfg, prev, { data, sets: next.sets }, evalOpts);
     const enabled = rollupsIn(cfg, res.state.sets);
     if (sameKeys(keys, enabled)) return res;
     if (round === MAX_ROLLUP_ROUNDS) {

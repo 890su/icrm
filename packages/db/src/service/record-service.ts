@@ -1,5 +1,5 @@
 import {
-  fieldStatesOf,
+  fieldStatesOf, readonlyErrors,
   type CompiledConfig, type EvalResult, type FieldState, type RecordError, type RecordState, type Value,
 } from '@icrm/core';
 import { sql, type Kysely, type Transaction } from 'kysely';
@@ -184,7 +184,9 @@ export class RecordService {
   /**
    * Replaces the targets of link field `field` (spec §1.5 checks), logs the change, refreshes the record's
    * own rollups, re-evaluates and writes it (version bump), then cascades to the old and new targets.
-   * Setting the targets the record already has is a no-op.
+   * Setting the targets the record already has is a no-op. A change of a field the rules make `readonly`
+   * (judged by the stored state, as for values) is rejected; the re-evaluation sees the new links, so a
+   * rule's `require` on the field is checked against them.
    */
   setLinks(i: SetLinksInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
@@ -197,6 +199,8 @@ export class RecordService {
       if (change === null) return this.view(tx, stored);
 
       const prev = stateOf(stored);
+      const readonly = readonlyErrors(this.cfg, prev, new Set([i.field]), this.now());
+      if (readonly.length > 0) throw new SaveFailed(readonly);
       const next: RecordState = { data: { ...prev.data }, sets: new Map(prev.sets) };
       const userChangedKeys = new Set<string>();
       const res = await this.evaluate(tx, i.id, prev, next, userChangedKeys);

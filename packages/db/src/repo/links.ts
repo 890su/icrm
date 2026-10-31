@@ -15,6 +15,12 @@ export async function linksFrom(tx: Db, fromId: string, field: string): Promise<
   return rows.map((r) => r.to_id);
 }
 
+/** Link fields of `fromId` that have at least one target. */
+export async function linkedFields(tx: Db, fromId: string): Promise<Set<string>> {
+  const rows = await tx.selectFrom('links').select('field_key').distinct().where('from_id', '=', fromId).execute();
+  return new Set(rows.map((r) => r.field_key));
+}
+
 /** Sources linking to `toId` under `field` (created_at, then from_id). */
 export async function linksTo(tx: Db, toId: string, field: string): Promise<string[]> {
   const rows = await tx

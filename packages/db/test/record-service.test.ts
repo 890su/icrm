@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { loadConfigDir } from '@icrm/core/node';
-import type { Value } from '@icrm/core';
+import { compileConfig, parseConfigFiles, type Value } from '@icrm/core';
 import { sql, type Kysely } from 'kysely';
 import { uuidv7 } from 'uuidv7';
 import { beforeAll, describe, expect, test } from 'vitest';
@@ -242,5 +242,65 @@ describe('RecordService.update', () => {
 describe('RecordService.get', () => {
   test('missing id gives null', async () => {
     expect(await svc.get(uuidv7())).toBeNull();
+  });
+});
+
+describe('link fields in rules', () => {
+  const LINK_RULES = `
+fields:
+  done: {type: bool, label: Готово}
+  locked: {type: bool, label: Закрыто}
+  conversation: {type: link, label: Разговор, target_sets: [conv]}
+  parent: {type: link, label: Родитель, target_sets: [task]}
+sets:
+  task: {label: Задача, fields: [title, done, locked, conversation, parent]}
+  conv: {label: Разговор, fields: [title]}
+rules:
+  - {id: conv_on_done, when: '{done}', require: [conversation]}
+  - {id: frozen, when: '{locked}', readonly: [parent]}
+`;
+  let ls: RecordService;
+  beforeAll(() => {
+    ls = new RecordService({
+      db, cfg: compileConfig(parseConfigFiles([{ name: 'rules.yaml', content: LINK_RULES }])), workspaceId, now: () => NOW,
+    });
+  });
+  const conv = async (): Promise<RecordView> => record(await ls.create({ userId, title: 'Р', sets: ['conv'] }));
+
+  test('require on a link field: create rejects without the link, accepts with it', async () => {
+    const c = await conv();
+    expect(await ls.create({ userId, title: 'T', sets: ['task'], data: { done: true } }))
+      .toEqual({ ok: false, errors: [expect.objectContaining({ code: 'required', field: 'conversation', rule_id: 'conv_on_done' })] });
+    const t = record(await ls.create({ userId, title: 'T', sets: ['task'], data: { done: true }, links: { conversation: [c.id] } }));
+    expect(t.links.conversation).toEqual([c.id]);
+  });
+
+  test('require on a link field: setLinks satisfies it, removing the link is rejected', async () => {
+    const c = await conv();
+    const t = record(await ls.create({ userId, title: 'T', sets: ['task'] }));
+    expect(await ls.update({ id: t.id, userId, expectedVersion: t.version, data: { done: true } }))
+      .toMatchObject({ ok: false, errors: [{ code: 'required', field: 'conversation' }] });
+    const linked = record(await ls.setLinks({ id: t.id, userId, field: 'conversation', targetIds: [c.id] }));
+    const done = record(await ls.update({ id: t.id, userId, expectedVersion: linked.version, data: { done: true } }));
+    expect(done.data.done).toBe(true);
+    expect(await ls.setLinks({ id: t.id, userId, field: 'conversation', targetIds: [] }))
+      .toMatchObject({ ok: false, errors: [{ code: 'required', field: 'conversation', rule_id: 'conv_on_done' }] });
+    expect((await ls.get(t.id))!.links.conversation).toEqual([c.id]);
+  });
+
+  test('readonly on a link field: setLinks is rejected while the rule holds (judged by the stored state)', async () => {
+    const p = record(await ls.create({ userId, title: 'P', sets: ['task'] }));
+    const t = record(await ls.create({ userId, title: 'T', sets: ['task'], data: { locked: true } }));
+    expect(await ls.setLinks({ id: t.id, userId, field: 'parent', targetIds: [p.id] })).toEqual({
+      ok: false,
+      errors: [{ field: 'parent', rule_id: 'frozen', code: 'readonly', message: 'Поле «Родитель» сейчас только для чтения' }],
+    });
+    const after = (await ls.get(t.id))!;
+    expect(after.links.parent).toEqual([]);
+    expect(after.version).toBe(t.version);
+    // Setting the targets it already has is still a no-op, not an error.
+    expect((await ls.setLinks({ id: t.id, userId, field: 'parent', targetIds: [] })).ok).toBe(true);
+    const open = record(await ls.update({ id: t.id, userId, expectedVersion: t.version, data: { locked: false } }));
+    expect(record(await ls.setLinks({ id: open.id, userId, field: 'parent', targetIds: [p.id] })).links.parent).toEqual([p.id]);
   });
 });
