@@ -149,6 +149,57 @@ sets:
     expect(row.data).toMatchObject({ hours: 3, work_hours: 5 });
   });
 
+  test('renaming an owned field moves the rows\' owner_field: old rows keep working under the new key', async () => {
+    const OWNED_V1 = `
+fields:
+  amount: {type: number, label: Сумма}
+  expenses: {type: link, label: Расходы, target_sets: [expense], owned: true}
+  total: {type: rollup, label: Итого, via: expenses, field: amount, agg: sum}
+sets:
+  task: {label: Задача, fields: [title, expenses, total]}
+  expense: {label: Расход, fields: [title, amount]}
+`;
+    const OWNED_V2 = OWNED_V1
+      .replace('expenses: {type: link, label: Расходы,', 'costs: {type: link, label: Расходы, was: expenses,')
+      .replace('via: expenses', 'via: costs')
+      .replace('fields: [title, expenses, total]', 'fields: [title, costs, total]');
+    const ws = await workspace();
+    const [v1, v2] = [compile(OWNED_V1), compile(OWNED_V2)];
+    const row = (amount: number) => ({ data: { amount }, sets: ['expense'] });
+    const owner = ok(await service(v1, ws).create({ userId, title: 'T', sets: ['task'], rows: { expenses: [row(1), row(2), row(4)] } }));
+    const [a, b, c] = owner.links.expenses!;
+    await syncConfig(db, v1, ws, now);
+
+    const report = await syncConfig(db, v2, ws, now);
+    expect(report.renamed).toEqual([{ from: 'expenses', to: 'costs' }]);
+    const columns = await db.selectFrom('records').select('owner_field').where('owner_id', '=', owner.id).execute();
+    expect(columns.map((r) => r.owner_field)).toEqual(['costs', 'costs', 'costs']);
+
+    const svc = service(v2, ws);
+    const moved = await get(svc, owner.id);
+    expect(moved.rows!.costs!.map((r) => r.id)).toEqual([a, b, c]);
+    expect(moved.data.total).toBe(7);
+
+    // PUT reorders the old rows
+    const reordered = ok(await svc.setLinks({ id: owner.id, userId, field: 'costs', targetIds: [c!, b!, a!] }));
+    expect(reordered.links.costs).toEqual([c, b, a]);
+
+    // batch change and delete of old rows
+    const aView = await get(svc, a!);
+    const batch = ok(await svc.update({ id: owner.id, userId, expectedVersion: reordered.version, rows: { costs: [
+      { id: a!, version: aView.version, data: { amount: 10 } }, { id: b!, delete: true },
+    ] } }));
+    expect(batch.links.costs).toEqual([c, a]);
+    expect(batch.data.total).toBe(14);
+
+    // direct archive of an old row relinks the owner under the new key
+    ok(await svc.archive({ id: c!, userId }));
+    const after = await get(svc, owner.id);
+    expect(after.links.costs).toEqual([a]);
+    expect(after.rows!.costs!.map((r) => r.id)).toEqual([a]);
+    expect(after.data.total).toBe(10);
+  });
+
   test('other workspaces are not touched', async () => {
     const [ws, other] = [await workspace(), await workspace()];
     const [v1, v2] = [compile(V1), compile(V2)];

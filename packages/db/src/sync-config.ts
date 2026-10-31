@@ -44,7 +44,8 @@ export function syncSignature(cfg: CompiledConfig, key: string): string | undefi
  * Brings the database in line with the config (spec §1.11), for one workspace. Safe to run at every start:
  * a second run with the same config changes nothing.
  *
- * 1. `was:` renames: the key moves inside `records.data` and `links.field_key`, once per `was→key` pair.
+ * 1. `was:` renames: the key moves inside `records.data`, `links.field_key` and `records.owner_field`, once
+ *    per `was→key` pair.
  * 2. Orphan keys (in `data`, not in the config) are reported; the data stays.
  * 3. Formula/rollup fields whose `syncSignature` differs from the stored one are marked
  *    `recomputing`, recomputed for the records that have the field, then stored as `ok`. If the
@@ -130,8 +131,9 @@ async function markSignature(
 
 /**
  * Moves `data[was]` to `data[key]` for every field with `was`, unless the record already has `key`
- * (then both stay and the old one shows up as an orphan), and repoints the links. Each rename is one
- * transaction ending with its `config_state` marker; no change-log entries (a system migration).
+ * (then both stay and the old one shows up as an orphan), and repoints the links and the `owner_field` of
+ * rows. Each rename is one transaction ending with its `config_state` marker; no change-log entries (a
+ * system migration).
  */
 async function migrateRenames(db: Kysely<DB>, cfg: CompiledConfig, workspaceId: string): Promise<SyncReport['renamed']> {
   const renamed: SyncReport['renamed'] = [];
@@ -158,6 +160,10 @@ async function migrateRenames(db: Kysely<DB>, cfg: CompiledConfig, workspaceId: 
           and not exists (
             select 1 from links o where o.field_key = ${to} and o.from_id = l.from_id and o.to_id = l.to_id)`
         .execute(tx);
+      // Rows of an owned field (spec §1.12) name it in `owner_field`; they must follow the link.
+      await sql`
+        update records set owner_field = ${to}
+        where workspace_id = ${workspaceId} and owner_field = ${from}`.execute(tx);
       await tx.insertInto('config_state')
         .values({ workspace_id: workspaceId, key: marker, kind: 'rename', value: to, status: 'ok' })
         .execute();
