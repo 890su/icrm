@@ -6,7 +6,7 @@ fields:
   warranty_months: {type: number, label: 'Гарантия, мес.'}
   act_file: {type: file, label: Акт}
   work_cost: {type: number, label: Стоимость работ}
-  notes: {type: text, label: Заметки}
+  memo: {type: text, label: Заметки}
   related: {type: link, label: Связанные задачи, target_sets: [task]}
 sets:
   task: {label: Задача, fields: [title, kind, done, start]}
@@ -15,7 +15,7 @@ sets:
     activation: rule
     requires: [task]
     fields: [warranty_months, act_file, work_cost]
-  contact: {label: Контакт, fields: [notes, related]}
+  person: {label: Контакт, fields: [memo, related]}
 rules:
   - id: montage_by_kind
     when: '{kind} = "montage"'

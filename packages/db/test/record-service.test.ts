@@ -87,8 +87,8 @@ describe('RecordService.create', () => {
   });
 
   test('manual set is enabled as manual and lists its link fields', async () => {
-    const r = record(await svc.create({ userId, title: 'x', sets: ['contact'] }));
-    expect(r.sets).toEqual([{ key: 'contact', enabledBy: 'manual' }]);
+    const r = record(await svc.create({ userId, title: 'x', sets: ['person'] }));
+    expect(r.sets).toEqual([{ key: 'person', enabledBy: 'manual' }]);
     expect(r.links).toEqual({ related: [] }); // link fields of enabled sets are listed
   });
 
@@ -107,12 +107,12 @@ describe('RecordService.create', () => {
   });
 
   test('"" and whitespace become null for non-text fields; text keeps the string', async () => {
-    const r = record(await svc.create({ userId, title: 'x', sets: ['task', 'contact'], data: { start: '', notes: '' } }));
+    const r = record(await svc.create({ userId, title: 'x', sets: ['task', 'person'], data: { start: '', memo: '' } }));
     expect(r.data.start ?? null).toBeNull();
-    expect(r.data.notes).toBe('');
-    const u = record(await svc.update({ id: r.id, userId, expectedVersion: r.version, data: { start: '   ', notes: '  ' } }));
+    expect(r.data.memo).toBe('');
+    const u = record(await svc.update({ id: r.id, userId, expectedVersion: r.version, data: { start: '   ', memo: '  ' } }));
     expect(u.data.start ?? null).toBeNull();
-    expect(u.data.notes).toBe('  ');
+    expect(u.data.memo).toBe('  ');
   });
 });
 
@@ -134,15 +134,15 @@ describe('RecordService.update', () => {
   });
 
   test('stale version rejected, record unchanged', async () => {
-    const a = await created(); await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { notes: 'x' } });
-    const r = await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { notes: 'y' } });
+    const a = await created(); await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { memo: 'x' } });
+    const r = await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { memo: 'y' } });
     expect(r).toEqual({ ok: false, errors: [expect.objectContaining({ code: 'version_conflict' })] });
-    expect((await svc.get(a.id))!.data.notes).toBe('x');
+    expect((await svc.get(a.id))!.data.memo).toBe('x');
   });
 
   test('concurrent updates with same version: exactly one wins', async () => {
     const a = await created();
-    const rs = await Promise.all([1, 2].map(n => svc.update({ id: a.id, userId, expectedVersion: a.version, data: { notes: String(n) } })));
+    const rs = await Promise.all([1, 2].map(n => svc.update({ id: a.id, userId, expectedVersion: a.version, data: { memo: String(n) } })));
     expect(rs.filter(r => r.ok)).toHaveLength(1);
     expect(rs.find((r) => !r.ok)).toEqual({ ok: false, errors: [expect.objectContaining({ code: 'version_conflict' })] });
     expect((await svc.get(a.id))!.version).toBe(2);
@@ -151,10 +151,10 @@ describe('RecordService.update', () => {
   test('validation failure rolls back everything', async () => {
     const a = await created({ kind: 'montage' });
     const logBefore = (await changeLog(a.id)).length;
-    const r = await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { done: true, notes: 'z' } });
+    const r = await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { done: true, memo: 'z' } });
     expect(r).toMatchObject({ ok: false, errors: [{ code: 'required', field: 'act_file', rule_id: 'act_required_on_done' }] });
     const after = (await svc.get(a.id))!;
-    expect(after.data.notes).toBeUndefined();
+    expect(after.data.memo).toBeUndefined();
     expect(after.version).toBe(a.version);
     expect(await changeLog(a.id)).toHaveLength(logBefore);
   });
@@ -173,11 +173,11 @@ describe('RecordService.update', () => {
 
   test('enable and disable manual sets, logged as user changes', async () => {
     const a = await created();
-    const on = record(await svc.update({ id: a.id, userId, expectedVersion: a.version, enableSets: ['contact'] }));
-    expect(on.sets).toEqual([{ key: 'contact', enabledBy: 'manual' }, { key: 'task', enabledBy: 'manual' }]);
-    const off = record(await svc.update({ id: a.id, userId, expectedVersion: on.version, disableSets: ['contact', 'ghost'] }));
+    const on = record(await svc.update({ id: a.id, userId, expectedVersion: a.version, enableSets: ['person'] }));
+    expect(on.sets).toEqual([{ key: 'person', enabledBy: 'manual' }, { key: 'task', enabledBy: 'manual' }]);
+    const off = record(await svc.update({ id: a.id, userId, expectedVersion: on.version, disableSets: ['person', 'ghost'] }));
     expect(off.sets).toEqual([{ key: 'task', enabledBy: 'manual' }]);
-    const sets = (await changeLog(a.id)).filter((e) => e.kind === 'set' && e.field_key === 'contact')
+    const sets = (await changeLog(a.id)).filter((e) => e.kind === 'set' && e.field_key === 'person')
       .map((e) => [e.old, e.new, e.source]);
     expect(sets).toEqual([[null, 'manual', 'user'], ['manual', null, 'user']]);
   });
@@ -201,7 +201,7 @@ describe('RecordService.update', () => {
 
   test('saves record with stale enum value when other field changes', async () => {
     const a = await created(); await rawSetData(db, a.id, { kind: 'removed_option' });
-    expect((await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { notes: 'ok' } })).ok).toBe(true);
+    expect((await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { memo: 'ok' } })).ok).toBe(true);
   });
 
   test('unknown field key rejected', async () => {
@@ -214,19 +214,19 @@ describe('RecordService.update', () => {
     const act = uuidv7();
     const a = await created({ kind: 'montage', done: true, act_file: act, work_cost: 100 });
     const r = await svc.update({
-      id: a.id, userId, expectedVersion: a.version, data: { kind: 'montage', work_cost: 100, notes: 'n' },
+      id: a.id, userId, expectedVersion: a.version, data: { kind: 'montage', work_cost: 100, memo: 'n' },
     });
-    expect(record(r).data).toMatchObject({ work_cost: 100, notes: 'n' });
+    expect(record(r).data).toMatchObject({ work_cost: 100, memo: 'n' });
     expect(await svc.update({ id: a.id, userId, expectedVersion: record(r).version, data: { work_cost: 200 } }))
       .toMatchObject({ ok: false, errors: [{ code: 'readonly', field: 'work_cost' }] });
   });
 
   test('missing record → not_found; archived record → archived', async () => {
-    expect(await svc.update({ id: uuidv7(), userId, expectedVersion: 1, data: { notes: 'x' } }))
+    expect(await svc.update({ id: uuidv7(), userId, expectedVersion: 1, data: { memo: 'x' } }))
       .toMatchObject({ ok: false, errors: [{ code: 'not_found' }] });
     const a = await created();
     await db.updateTable('records').set({ archived_at: new Date() }).where('id', '=', a.id).execute();
-    expect(await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { notes: 'x' } }))
+    expect(await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { memo: 'x' } }))
       .toMatchObject({ ok: false, errors: [{ code: 'archived' }] });
   });
 
@@ -234,7 +234,7 @@ describe('RecordService.update', () => {
     const other = new RecordService({ db, cfg: await loadConfigDir(CONFIG_DIR), workspaceId: uuidv7() });
     const a = await created();
     expect(await other.get(a.id)).toBeNull();
-    expect(await other.update({ id: a.id, userId, expectedVersion: a.version, data: { notes: 'x' } }))
+    expect(await other.update({ id: a.id, userId, expectedVersion: a.version, data: { memo: 'x' } }))
       .toMatchObject({ ok: false, errors: [{ code: 'not_found' }] });
   });
 });
@@ -279,7 +279,7 @@ describe('retry on deadlock and serialization failure', () => {
   test('after three failed attempts the error is rethrown', async () => {
     const a = await created();
     const spy = failTransactions(3);
-    await expect(svc.update({ id: a.id, userId, expectedVersion: a.version, data: { notes: 'x' } }))
+    await expect(svc.update({ id: a.id, userId, expectedVersion: a.version, data: { memo: 'x' } }))
       .rejects.toMatchObject({ code: '40P01' });
     expect(spy).toHaveBeenCalledTimes(3);
     expect((await svc.get(a.id))!.version).toBe(a.version);

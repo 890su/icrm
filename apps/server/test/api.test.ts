@@ -81,13 +81,14 @@ describe('meta', () => {
     expect(JSON.stringify(r.json())).not.toContain('"src"');
 
     const meta = r.json();
-    expect(meta.sets.map((s: { key: string }) => s.key)).toEqual(['task', 'expense', 'montage']);
+    expect(meta.sets.map((s: { key: string }) => s.key)).toEqual(['contact', 'organization', 'membership', 'task', 'expense', 'montage']);
     expect(meta.sets.find((s: { key: string }) => s.key === 'montage')).toMatchObject({
       requires: ['task'], closure: ['montage', 'task'].sort(),
     });
-    expect(meta.fields.map((f: { key: string }) => f.key)).toEqual(expect.arrayContaining(['title', 'notes', 'done', 'act_file', 'related']));
+    expect(meta.fields.map((f: { key: string }) => f.key)).toEqual(expect.arrayContaining(['title', 'memo', 'done', 'act_file', 'related']));
     expect(meta.fields.find((f: { key: string }) => f.key === 'related')).toMatchObject({ type: 'link', target_sets: ['task'] });
-    expect(meta.rules).toEqual([expect.objectContaining({ id: 'act_required_on_done', require: ['act_file'] })]);
+    expect(meta.rules.map((r: { id: string }) => r.id)).toEqual(['membership_links_required', 'membership_dates_order', 'act_required_on_done']);
+    expect(meta.rules.find((r: { id: string }) => r.id === 'act_required_on_done')).toMatchObject({ require: ['act_file'] });
     // compiled internals stay on the server
     expect(JSON.stringify(meta)).not.toMatch(/whenAst|"deps"|"ast"/);
   });
@@ -98,14 +99,14 @@ describe('records', () => {
     const c = await post('/records', { title: 'T', sets: ['task'] });
     expect(c.statusCode).toBe(201);
     const v = c.json().version;
-    expect((await patch(`/records/${c.json().id}`, { version: v, data: { notes: 'a' } })).statusCode).toBe(200);
-    const stale = await patch(`/records/${c.json().id}`, { version: v, data: { notes: 'b' } });
+    expect((await patch(`/records/${c.json().id}`, { version: v, data: { memo: 'a' } })).statusCode).toBe(200);
+    const stale = await patch(`/records/${c.json().id}`, { version: v, data: { memo: 'b' } });
     expect(stale.statusCode).toBe(409);
     expect(stale.json().errors[0].code).toBe('version_conflict');
 
     const now = await get(`/records/${c.json().id}`);
     expect(now.statusCode).toBe(200);
-    expect(now.json()).toMatchObject({ title: 'T', data: { notes: 'a' }, version: v + 1 });
+    expect(now.json()).toMatchObject({ title: 'T', data: { memo: 'a' }, version: v + 1 });
   });
 
   test('get and patch of an unknown record → 404', async () => {
@@ -165,8 +166,8 @@ describe('records', () => {
   });
 
   test('links and query end-to-end', async () => {
-    const a = await create({ title: 'Первая', sets: ['task'], data: { notes: 'alpha' } });
-    const b = await create({ title: 'Вторая', sets: ['task'], data: { notes: 'beta' } });
+    const a = await create({ title: 'Первая', sets: ['task'], data: { memo: 'alpha' } });
+    const b = await create({ title: 'Вторая', sets: ['task'], data: { memo: 'beta' } });
 
     const linked = await put(`/records/${a.id}/links/related`, { targetIds: [b.id] });
     expect(linked.statusCode, linked.body).toBe(200);
@@ -174,19 +175,19 @@ describe('records', () => {
     expect((await get(`/records/${a.id}`)).json().links.related).toEqual([b.id]);
 
     // links given at create time
-    const c = await create({ title: 'Третья', sets: ['task'], data: { notes: 'gamma' }, links: { related: [a.id] } });
+    const c = await create({ title: 'Третья', sets: ['task'], data: { memo: 'gamma' }, links: { related: [a.id] } });
     expect((await get(`/records/${c.id}`)).json().links.related).toEqual([a.id]);
 
     // other tests share the database, so the queries are scoped to this test's records
-    const mine = 'HAS_SET("task") AND ({notes} = "alpha" OR {notes} = "beta" OR {notes} = "gamma")';
+    const mine = 'HAS_SET("task") AND ({memo} = "alpha" OR {memo} = "beta" OR {memo} = "gamma")';
     const all = await post('/query', { filter: mine });
     expect(all.statusCode).toBe(200);
     const ids = all.json().items.map((i: { id: string }) => i.id);
     expect(ids.sort()).toEqual([a.id, b.id, c.id].sort());
     expect(all.json().total).toBe(3);
 
-    const byText = await post('/query', { filter: '{notes} = "beta"', sort: [{ field: 'title', dir: 'asc' }] });
-    expect(byText.json()).toMatchObject({ total: 1, items: [{ id: b.id, title: 'Вторая', data: { notes: 'beta' } }] });
+    const byText = await post('/query', { filter: '{memo} = "beta"', sort: [{ field: 'title', dir: 'asc' }] });
+    expect(byText.json()).toMatchObject({ total: 1, items: [{ id: b.id, title: 'Вторая', data: { memo: 'beta' } }] });
 
     const page = await post('/query', { filter: mine, sort: [{ field: 'title', dir: 'asc' }], limit: 1, offset: 1 });
     expect(page.json().items.map((i: { id: string }) => i.id)).toEqual([a.id]); // Вторая, Первая, Третья
@@ -212,7 +213,7 @@ describe('records', () => {
     const missing = await put(`/records/${a.id}/links/related`, { targetIds: ['0198a000-0000-7000-8000-000000000000'] });
     expect(missing.statusCode).toBe(422);
     expect(missing.json().errors[0].code).toBe('link_target');
-    const notLink = await put(`/records/${a.id}/links/notes`, { targetIds: [] });
+    const notLink = await put(`/records/${a.id}/links/memo`, { targetIds: [] });
     expect(notLink.statusCode).toBe(422);
     expect(notLink.json().errors[0].code).toBe('unknown_field');
   });
@@ -301,7 +302,7 @@ describe('rows', () => {
     expect(after).toMatchObject({ title: 'Задача с расходами', version: t.version });
     expect(after.rows.expenses).toEqual([]);
 
-    const create422 = await post('/records', { title: 'x', sets: ['task'], rows: { notes: [{}] } });
+    const create422 = await post('/records', { title: 'x', sets: ['task'], rows: { memo: [{}] } });
     expect(create422.statusCode).toBe(422);
     expect(create422.json().errors[0].code).toBe('unknown_field');
   });
@@ -399,14 +400,14 @@ describe('rows', () => {
 
 describe('query errors', () => {
   test('bad filter → 400 with position', async () => {
-    const r = await post('/query', { filter: '{notes} = = 1' });
+    const r = await post('/query', { filter: '{memo} = = 1' });
     expect(r.statusCode).toBe(400);
     expect(r.json().error).toMatchObject({ code: 'syntax', pos: { start: expect.any(Number), end: expect.any(Number) } });
     expect(typeof r.json().error.message).toBe('string');
   });
 
   test('type error and unknown field in a filter → 400', async () => {
-    const t = await post('/query', { filter: '{notes} + 1' });
+    const t = await post('/query', { filter: '{memo} + 1' });
     expect(t.statusCode).toBe(400);
     expect(t.json().error.code).toBe('type');
     expect((await post('/query', { filter: '{nope} = 1' })).statusCode).toBe(400);
@@ -433,7 +434,7 @@ describe('malformed requests are 400, never 500', () => {
       ['/records', {}],
       ['/records', { title: 5 }],
       ['/records', { title: 'x', sets: 'task' }],
-      ['/records', { title: 'x', data: { notes: { deep: 1 } } }],
+      ['/records', { title: 'x', data: { memo: { deep: 1 } } }],
       ['/records', { title: 'x', links: { related: ['not-a-uuid'] } }],
       ['/records', { title: 'x', extra: true }],
       ['/records', [1, 2]],
@@ -452,8 +453,8 @@ describe('malformed requests are 400, never 500', () => {
   test('well-formed JSON the database cannot store → 400', async () => {
     const bodies: [string, unknown][] = [
       ['/records', { title: 'a\u0000b' }],
-      ['/records', { title: 'x', sets: ['task'], data: { notes: 'a\u0000b' } }],
-      ['/query', { filter: '{notes} = "a\u0000b"' }],
+      ['/records', { title: 'x', sets: ['task'], data: { memo: 'a\u0000b' } }],
+      ['/query', { filter: '{memo} = "a\u0000b"' }],
       ['/query', { offset: 1e20 }],
       ['/query', { offset: 1e21 }],
       ['/query', { limit: 1e21 }],
@@ -464,7 +465,7 @@ describe('malformed requests are 400, never 500', () => {
     }
     // NUL in a patch leaves the record untouched
     const c = await create({ title: 'N', sets: ['task'] });
-    const bad = await patch(`/records/${c.id}`, { version: c.version, data: { notes: 'a\u0000b' } });
+    const bad = await patch(`/records/${c.id}`, { version: c.version, data: { memo: 'a\u0000b' } });
     expect(bad.statusCode).toBe(400);
     expect((await get(`/records/${c.id}`)).json().version).toBe(c.version);
   });

@@ -1,2 +1,2 @@
 sets:
-  contact: {label: Контакт, fields: [no_such_field]}
+  person: {label: Контакт, fields: [no_such_field]}

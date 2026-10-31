@@ -1,0 +1,5 @@
+# Contacts (spec 2026-10-31-contacts-organizations-design.md §2): the system sets come from @icrm/core;
+# this file only extends them.
+extend:
+  fields:
+    role: {options: [ЛПР, бухгалтер, техник, муж, жена, сын, дочь, другое]}

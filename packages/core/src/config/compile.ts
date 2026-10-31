@@ -184,12 +184,13 @@ export function compileConfig(raw: RawConfig): CompiledConfig {
 
   // --- renames ------------------------------------------------------------------------------
   // `was` moves stored data from the old key (spec §1.11), so the old key must be gone from the config
-  // and belong to one field only; anything else would silently move live data.
+  // and belong to one field only; anything else would silently move live data. The exception is a key a
+  // system field has since claimed (a user field squatting on it must move out of the way).
   const wasOwner = new Map<string, FieldDef>();
   for (const d of defs.values()) {
     if (d.was === undefined) continue;
     const first = wasOwner.get(d.was);
-    if (defs.has(d.was)) {
+    if (defs.get(d.was)?.system !== true && defs.has(d.was)) {
       report(d.src, 'was', `поле "${d.was}" есть в конфиге; was указывает только ключ, которого больше нет`);
     } else if (first !== undefined) {
       report(d.src, 'was', `was: "${d.was}" уже указан у ${first.src.path}`);

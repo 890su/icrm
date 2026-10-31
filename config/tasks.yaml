@@ -1,5 +1,5 @@
-# Starter config: an example for development. The system sets `conversation` / `contact`
-# arrive with sub-projects 2-3; `title` is built in.
+# Starter config: an example for development. The system sets `contact` / `organization` /
+# `membership` are built into @icrm/core (see contacts.yaml); `conversation` arrives with sub-project 3; `title` is built in.
 fields:
   description: {type: text, label: Описание, multiline: true}
   responsible: {type: user, label: Ответственный}
@@ -20,7 +20,7 @@ fields:
     agg: sum
   branch_hours: {type: formula, label: Часы с подзадачами, expr: '{own_hours} + {total_hours}'}
 
-  address: {type: text, label: Адрес}
+  site_address: {type: text, label: Адрес объекта, was: address}
   warranty_months: {type: number, label: 'Гарантия, мес.'}
   act_file: {type: file, label: Акт выполненных работ}
   work_cost: {type: formula, label: Стоимость работ, expr: '{hours} * {rate}'}
@@ -34,7 +34,7 @@ sets:
     label: Монтаж
     activation: rule
     requires: [task]
-    fields: [address, warranty_months, act_file, work_cost]
+    fields: [site_address, warranty_months, act_file, work_cost]
 
 rules:
   - id: montage_by_kind

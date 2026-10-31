@@ -59,7 +59,7 @@ fields:
     field: total_hours
     agg: sum
   total_hours: {type: formula, label: Часы всего, expr: '{own_hours} + COALESCE({children_total}, 0)'}
-  watchers: {type: link, label: Наблюдатели, target_sets: [contact]}
+  watchers: {type: link, label: Наблюдатели, target_sets: [person]}
 sets:
   conversation: {label: Разговор, fields: [title, tasks_cost_total, open_tasks_count, cost_cap, billable]}
   has_work: {label: Есть работа, activation: rule, fields: [work_note, open_hours]}
@@ -68,7 +68,7 @@ sets:
     label: Задача
     fields: [title, hours, rate, labor_cost, done, conversation, conversation_title,
              parent_task, own_hours, children_total, total_hours]
-  contact: {label: Контакт, fields: [title, watchers]}
+  person: {label: Контакт, fields: [title, watchers]}
 rules:
   - id: billing_when_billable
     when: '{billable}'

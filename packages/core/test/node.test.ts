@@ -15,5 +15,10 @@ test('loadConfigDir reads *.yaml and *.yml alphabetically and compiles', async (
   const c = await loadConfigDir(dir);
   expect(c.fields.get('cost')!.valueType).toBe('number');
   expect(c.sets.get('task')!.fields).toEqual(['hours', 'cost']);
-  expect([...c.fields.keys()]).toEqual(['title', 'hours', 'cost']);
+  expect([...c.fields.keys()]).toEqual([
+    'title', 'notes', 'needs_review', 'merged_into', 'org_kind', 'nip', 'address', 'email_domains',
+    'contact', 'organization', 'role', 'position', 'active_from', 'active_to', 'is_primary', 'is_active',
+    'hours', 'cost',
+  ]);
+  expect([...c.sets.keys()]).toEqual(['contact', 'organization', 'membership', 'task']);
 });

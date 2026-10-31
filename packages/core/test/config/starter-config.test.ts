@@ -19,7 +19,7 @@ describe('starter config (config/)', () => {
     expect(cfg.sets.get('montage')).toMatchObject({ activation: 'rule', requires: ['task'] });
     expect(cfg.sets.get('montage')!.closure).toEqual(expect.arrayContaining(['task', 'montage']));
     expect(cfg.sets.get('montage')!.fields).toEqual(
-      expect.arrayContaining(['address', 'warranty_months', 'act_file', 'work_cost']));
+      expect.arrayContaining(['site_address', 'warranty_months', 'act_file', 'work_cost']));
     expect(cfg.fields.get('kind')).toMatchObject({ type: 'enum', options: ['visit', 'montage', 'supply', 'consult'] });
     expect(cfg.fields.get('work_cost')!.type).toBe('formula');
   });
@@ -58,6 +58,14 @@ describe('starter config (config/)', () => {
 
   test('engine: work_cost = hours * rate', () => {
     expect(run({ kind: 'montage', hours: 3, rate: 100 }, { task: 'manual' }).state.data.work_cost).toBe(300);
+  });
+});
+
+describe('starter config: contacts (contacts.yaml)', () => {
+  test('starter config extends roles and renames montage address', () => {
+    expect(cfg.fields.get('role')!.options).toContain('жена');
+    expect(cfg.fields.get('site_address')!.was).toBe('address');
+    expect(cfg.fields.get('address')!.system).toBe(true);
   });
 });
 
