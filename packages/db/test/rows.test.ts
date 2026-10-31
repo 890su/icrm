@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { loadConfigDir } from '@icrm/core/node';
 import type { CompiledConfig, Value } from '@icrm/core';
-import type { Kysely } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import { beforeAll, describe, expect, test } from 'vitest';
 import { ensureWorkspace, queryRecords, RecordService, type DB, type RecordView, type SaveResult } from '../src/index.js';
 import { freshDb } from './setup-pg.js';
@@ -679,5 +679,71 @@ describe('readonly owned field and target sets (spec §1.12 item 3)', () => {
     expect(after.version).toBe(owner.version + 1);
     const totals = (await changeLog(owner.id)).filter((e) => e.kind === 'value' && e.field_key === 'expenses_total').at(-1);
     expect(totals).toMatchObject({ old: 15, new: 16, source: 'cascade', user_id: userId });
+  });
+});
+
+describe('lock order of direct saves of a row (owner before row)', () => {
+  /** Waits until some backend of this database waits for a lock. */
+  async function someoneWaits(): Promise<void> {
+    for (let n = 0; n < 200; n++) {
+      const { rows } = await sql<{ n: number }>`
+        select count(*)::int as n from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock'`.execute(db);
+      if (rows[0]!.n > 0) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error('no backend waits for a lock');
+  }
+
+  /**
+   * Holds a lock on `ownerId` in another transaction, starts `save`, waits until it blocks, then checks the
+   * row `rowId` is not locked yet (NOWAIT succeeds): the save waits for the owner before it touches the row.
+   */
+  async function waitsForOwnerFirst(ownerId: string, rowId: string, save: () => Promise<SaveResult>): Promise<SaveResult> {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let lockedOwner!: () => void;
+    const ready = new Promise<void>((r) => { lockedOwner = r; });
+    const holder = db.transaction().execute(async (tx) => {
+      await sql`select id from records where id = ${ownerId} for update`.execute(tx);
+      lockedOwner();
+      await held;
+    });
+    await ready;
+    const pending = save();
+    try {
+      await someoneWaits();
+      await db.transaction().execute(async (tx) => {
+        await sql`select id from records where id = ${rowId} for update nowait`.execute(tx);
+      });
+    } finally {
+      release();
+      await holder;
+    }
+    return pending;
+  }
+
+  test('update of a row locks its owner first', async () => {
+    const { owner, a } = await taskWithRows();
+    const res = await waitsForOwnerFirst(owner.id, a.id,
+      () => svc.update({ id: a.id, userId, expectedVersion: a.version, data: { amount: 11 } }));
+    expect(res.ok).toBe(true);
+    expect((await must(owner.id)).data).toMatchObject({ expenses_total: 16 });
+  });
+
+  test('setLinks of a row locks its owner first', async () => {
+    const { owner, a } = await taskWithRows();
+    const withBudget = record(await svc.update({ id: a.id, userId, expectedVersion: a.version, enableSets: ['budget'],
+      rows: { budget_lines: [expense({ amount: 1 }), expense({ amount: 2 })] } }));
+    const [x, y] = withBudget.links.budget_lines!;
+    const res = await waitsForOwnerFirst(owner.id, a.id,
+      () => svc.setLinks({ id: a.id, userId, field: 'budget_lines', targetIds: [y!, x!] }));
+    expect(res.ok && res.record.links.budget_lines).toEqual([y, x]);
+  });
+
+  test('archive of a row locks its owner first', async () => {
+    const { owner, a } = await taskWithRows();
+    const res = await waitsForOwnerFirst(owner.id, a.id, () => svc.archive({ id: a.id, userId }));
+    expect(res.ok).toBe(true);
   });
 });

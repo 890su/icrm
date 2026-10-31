@@ -161,12 +161,12 @@ export class RecordService {
    * (`saveRows`), then the owner is evaluated (its rollups see the rows) and written; one cascade over the
    * rows and the owner follows, which also refreshes the rows' rollups over the owner.
    *
-   * A row (spec §1.12) must keep one of the `target_sets` of its owned field (`link_target`, with that
-   * field), as a change op of its owner's batch must.
+   * A row (spec §1.12) is locked after its owner (`lockWithOwner`) and must keep one of the `target_sets`
+   * of its owned field (`link_target`, with that field), as a change op of its owner's batch must.
    */
   update(i: UpdateInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
-      const stored = await this.lockEditable(tx, i.id, i.expectedVersion);
+      const { stored } = await this.lockWithOwner(tx, i.id, i.expectedVersion);
       const prepared = this.prepareUpdate(i, stored);
       const batch = i.rows === undefined
         ? noRows()
@@ -190,13 +190,13 @@ export class RecordService {
    *
    * On an owned field (spec §1.12) `targetIds` may only reorder and drop the record's current rows
    * (`link_owned` otherwise): the dropped rows are locked (after the record, in id order) and archived with
-   * their own rows, as by a `delete` op.
+   * their own rows, as by a `delete` op. A row is locked after its owner (`lockWithOwner`).
    */
   setLinks(i: SetLinksInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
       // Before any row lock: the holder of the hierarchy lock may cascade into rows other savers lock.
       await this.lockHierarchies(tx, [i.field]);
-      const stored = await this.lockEditable(tx, i.id);
+      const { stored } = await this.lockWithOwner(tx, i.id);
       const errors = await this.linkErrors(tx, i.id, stored.sets, i.field, i.targetIds);
       if (errors.length > 0) throw new SaveFailed(errors);
 
@@ -227,21 +227,14 @@ export class RecordService {
    *
    * Spec §1.12: the rows the record owns are archived with it, recursively (logged `cascade`, counted
    * against the cascade limit); links stay. Archiving a row deletes it: it also leaves its owner's owned
-   * link, and the owner is re-evaluated and written (version bump, `link` entry). To keep the lock order of
-   * a batch (owner before rows), the owner of a row is locked before the row: the row's `owner_id` is read
-   * unlocked first (it never changes after insert). A row whose owner is archived is `archived`; a row of
-   * an owned field the owner's rules make `readonly` (judged by the owner's stored state) is `readonly`.
-   * Archiving the owner itself is always allowed.
+   * link, and the owner is re-evaluated and written (version bump, `link` entry). The row is locked after
+   * its owner (`lockWithOwner`; a row whose owner is archived is `archived`). A row of an owned field the
+   * owner's rules make `readonly` (judged by the owner's stored state) is `readonly`. Archiving the owner
+   * itself is always allowed.
    */
   archive(i: ArchiveInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
-      const peek = (await loadRecords(tx, [i.id], { workspaceId: this.workspaceId })).get(i.id);
-      const ownerId = peek?.ownerId ?? null;
-      const owner = ownerId === null
-        ? undefined
-        : (await loadRecords(tx, [ownerId], { forUpdate: true, workspaceId: this.workspaceId })).get(ownerId);
-      const stored = await this.lockEditable(tx, i.id);
-      if (owner !== undefined && owner.archivedAt !== null) throw new SaveFailed([archived(i.id)]);
+      const { stored, owner } = await this.lockWithOwner(tx, i.id);
       if (owner !== undefined && stored.ownerField !== null) {
         // A readonly owned field (judged by the owner's stored state) freezes its membership.
         const readonly = readonlyErrors(this.cfg, stateOf(owner), new Set([stored.ownerField]), this.now());
@@ -314,6 +307,32 @@ export class RecordService {
     if (expectedVersion !== undefined && stored.version !== expectedVersion) throw new SaveFailed([versionConflict(id)]);
     if (stored.archivedAt !== null) throw new SaveFailed([archived(id)]);
     return stored;
+  }
+
+  /**
+   * `lockEditable` for a direct save of record `id`; when it is a row (spec §1.12), its owner is locked
+   * first (`lockOwnerOf`), keeping the lock order of a batch (owner before rows). Under the locks: a row
+   * whose owner is archived is `archived`. `owner` is undefined for a record that is not a row.
+   */
+  private async lockWithOwner(
+    tx: Db, id: string, expectedVersion?: number,
+  ): Promise<{ stored: StoredRecord; owner?: StoredRecord }> {
+    const owner = await this.lockOwnerOf(tx, id);
+    const stored = await this.lockEditable(tx, id, expectedVersion);
+    if (owner !== undefined && owner.archivedAt !== null) throw new SaveFailed([archived(id)]);
+    return { stored, owner };
+  }
+
+  /**
+   * Locks the owner of record `id` when `id` is a row of this workspace and returns it (undefined
+   * otherwise). The row's `owner_id` is read unlocked: it never changes after insert, so the row locked
+   * afterwards has the same owner.
+   */
+  private async lockOwnerOf(tx: Db, id: string): Promise<StoredRecord | undefined> {
+    const peek = (await loadRecords(tx, [id], { workspaceId: this.workspaceId })).get(id);
+    const ownerId = peek?.ownerId ?? null;
+    if (ownerId === null) return undefined;
+    return (await loadRecords(tx, [ownerId], { forUpdate: true, workspaceId: this.workspaceId })).get(ownerId);
   }
 
   /**
