@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfigDir } from '@icrm/core/node';
 import { RecordService } from '@icrm/db';
@@ -54,11 +54,15 @@ describe('auth', () => {
 
   test('401 for a wrong token (same length, other length) and a non-Bearer scheme, without echoing it', async () => {
     const sameLength = 'x'.repeat(TOKEN.length);
-    for (const authorization of [`Bearer ${sameLength}`, 'Bearer short', `Basic ${TOKEN}`, 'Bearer ']) {
+    const cases: [string, string | null][] = [
+      [`Bearer ${sameLength}`, sameLength], ['Bearer short', 'short'], [`Basic ${TOKEN}`, TOKEN], ['Bearer ', null],
+    ];
+    for (const [authorization, secret] of cases) {
       const r = await app.inject({ method: 'GET', url: '/meta', headers: { authorization } });
       expect(r.statusCode, authorization).toBe(401);
       expect(r.json().errors[0].code).toBe('unauthorized');
-      expect(r.body).not.toContain(sameLength);
+      if (secret !== null) expect(r.body, authorization).not.toContain(secret);
+      expect(r.body).not.toContain(TOKEN);
     }
   });
 
@@ -114,14 +118,14 @@ describe('records', () => {
   });
 
   test('rule violation → 422 with field errors', async () => {
-    const r = await post('/records', { title: 'Монтаж', sets: ['montage'], data: { done: true } });
+    const r = await post('/records', { title: 'Монтаж-откат', sets: ['montage'], data: { done: true } });
     expect(r.statusCode).toBe(422);
     expect(r.json().errors).toEqual([
       expect.objectContaining({ code: 'required', field: 'act_file', rule_id: 'act_required_on_done' }),
     ]);
 
     // the failed create left nothing behind
-    const q = await post('/query', { filter: 'HAS_SET("montage")' });
+    const q = await post('/query', { filter: '{title} = "Монтаж-откат"' });
     expect(q.json().total).toBe(0);
 
     // the same rule on an update, with the value that satisfies it
@@ -169,21 +173,23 @@ describe('records', () => {
     expect((await get(`/records/${a.id}`)).json().links).toEqual({ related: [b.id] });
 
     // links given at create time
-    const c = await create({ title: 'Третья', sets: ['task'], links: { related: [a.id] } });
+    const c = await create({ title: 'Третья', sets: ['task'], data: { notes: 'gamma' }, links: { related: [a.id] } });
     expect((await get(`/records/${c.id}`)).json().links).toEqual({ related: [a.id] });
 
-    const all = await post('/query', { filter: 'HAS_SET("task")' });
+    // other tests share the database, so the queries are scoped to this test's records
+    const mine = 'HAS_SET("task") AND ({notes} = "alpha" OR {notes} = "beta" OR {notes} = "gamma")';
+    const all = await post('/query', { filter: mine });
     expect(all.statusCode).toBe(200);
     const ids = all.json().items.map((i: { id: string }) => i.id);
-    expect(ids).toEqual(expect.arrayContaining([a.id, b.id, c.id]));
-    expect(all.json().total).toBe(ids.length);
+    expect(ids.sort()).toEqual([a.id, b.id, c.id].sort());
+    expect(all.json().total).toBe(3);
 
     const byText = await post('/query', { filter: '{notes} = "beta"', sort: [{ field: 'title', dir: 'asc' }] });
     expect(byText.json()).toMatchObject({ total: 1, items: [{ id: b.id, title: 'Вторая', data: { notes: 'beta' } }] });
 
-    const page = await post('/query', { filter: 'HAS_SET("task")', sort: [{ field: 'title', dir: 'asc' }], limit: 1, offset: 1 });
-    expect(page.json().items).toHaveLength(1);
-    expect(page.json().total).toBe(ids.length);
+    const page = await post('/query', { filter: mine, sort: [{ field: 'title', dir: 'asc' }], limit: 1, offset: 1 });
+    expect(page.json().items.map((i: { id: string }) => i.id)).toEqual([a.id]); // Вторая, Первая, Третья
+    expect(page.json().total).toBe(3);
 
     // an empty body is a valid query
     expect((await post('/query')).statusCode).toBe(200);
@@ -207,6 +213,7 @@ describe('records', () => {
     expect(missing.json().errors[0].code).toBe('link_target');
     const notLink = await put(`/records/${a.id}/links/notes`, { targetIds: [] });
     expect(notLink.statusCode).toBe(422);
+    expect(notLink.json().errors[0].code).toBe('unknown_field');
   });
 });
 
@@ -262,6 +269,39 @@ describe('malformed requests are 400, never 500', () => {
     }
   });
 
+  test('well-formed JSON the database cannot store → 400', async () => {
+    const bodies: [string, unknown][] = [
+      ['/records', { title: 'a\u0000b' }],
+      ['/records', { title: 'x', sets: ['task'], data: { notes: 'a\u0000b' } }],
+      ['/query', { filter: '{notes} = "a\u0000b"' }],
+      ['/query', { offset: 1e20 }],
+      ['/query', { offset: 1e21 }],
+      ['/query', { limit: 1e21 }],
+    ];
+    for (const [url, body] of bodies) {
+      const r = await post(url, body);
+      expect(r.statusCode, `${url} ${JSON.stringify(body)}: ${r.body}`).toBe(400);
+    }
+    // NUL in a patch leaves the record untouched
+    const c = await create({ title: 'N', sets: ['task'] });
+    const bad = await patch(`/records/${c.id}`, { version: c.version, data: { notes: 'a\u0000b' } });
+    expect(bad.statusCode).toBe(400);
+    expect((await get(`/records/${c.id}`)).json().version).toBe(c.version);
+  });
+
+  test('an empty body with Content-Type: application/json is allowed where no body is needed', async () => {
+    const headers = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    const c = await create({ title: 'E', sets: ['task'] });
+    const archive = await app.inject({ method: 'POST', url: `/records/${c.id}/archive`, headers });
+    expect(archive.statusCode, archive.body).toBe(200);
+    const query = await app.inject({ method: 'POST', url: '/query', headers });
+    expect(query.statusCode, query.body).toBe(200);
+    // ...but not where a body is required
+    const create400 = await app.inject({ method: 'POST', url: '/records', headers });
+    expect(create400.statusCode).toBe(400);
+    expect(create400.json().errors[0].code).toBe('bad_request');
+  });
+
   test('patch and links bodies, bad ids', async () => {
     const c = await create({ title: 'P', sets: ['task'] });
     for (const body of [{}, { version: 'one' }, { version: -1 }, { version: 1.5 }, { version: c.version, data: 'x' }]) {
@@ -278,6 +318,7 @@ describe('error mapping', () => {
   test('unknown route → 404', async () => {
     const r = await get('/nope');
     expect(r.statusCode).toBe(404);
+    expect(r.json().errors[0].code).toBe('not_found');
   });
 
   test.each(['40P01', '40001'])('postgres %s → 409 version_conflict', async (code) => {
@@ -297,33 +338,45 @@ describe('error mapping', () => {
 });
 
 describe('main', () => {
-  test('main exits 1 on broken config', () => {
-    const r = spawnSync(process.execPath, ['--import', 'tsx', MAIN], {
+  const VALID_TOKEN = 'a-valid-token-0123456789';
+
+  /** Runs main.ts through tsx; every case here must exit before any connection is made. */
+  function runMain(env: Record<string, string | undefined>): SpawnSyncReturns<string> {
+    return spawnSync(process.execPath, ['--import', 'tsx', MAIN], {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
       encoding: 'utf8',
       timeout: 60_000,
-      // The config is loaded before any connection is made, so these never get used.
       env: {
         ...process.env,
-        ICRM_CONFIG_DIR: fixture('broken'),
+        ICRM_CONFIG_DIR: fixture('ok'),
         DATABASE_URL: 'postgres://nobody:nothing@127.0.0.1:1/none',
-        ICRM_API_TOKEN: 'dummy',
+        ICRM_API_TOKEN: VALID_TOKEN,
+        PORT: undefined,
+        ...env,
       },
     });
+  }
+
+  test('main exits 1 on broken config', () => {
+    // The config is loaded before any connection is made, so the dummy DATABASE_URL never gets used.
+    const r = runMain({ ICRM_CONFIG_DIR: fixture('broken') });
     expect(r.status, r.stderr).toBe(1);
     expect(r.stderr).toContain('b.yaml:');
     expect(r.stderr).toContain('no_such_field');
   }, 90_000);
 
-  test('main exits 1 without ICRM_API_TOKEN', () => {
-    const { ICRM_API_TOKEN: _token, ...env } = process.env;
-    const r = spawnSync(process.execPath, ['--import', 'tsx', MAIN], {
-      cwd: fileURLToPath(new URL('..', import.meta.url)),
-      encoding: 'utf8',
-      timeout: 60_000,
-      env: { ...env, ICRM_CONFIG_DIR: fixture('ok'), DATABASE_URL: 'postgres://nobody:nothing@127.0.0.1:1/none' },
-    });
+  test.each([
+    ['ICRM_API_TOKEN unset', { ICRM_API_TOKEN: undefined }, 'ICRM_API_TOKEN is required'],
+    ['ICRM_API_TOKEN empty', { ICRM_API_TOKEN: '' }, 'ICRM_API_TOKEN is required'],
+    ['ICRM_API_TOKEN too short', { ICRM_API_TOKEN: 'short' }, 'at least 16'],
+    ['DATABASE_URL empty', { DATABASE_URL: '' }, 'DATABASE_URL is required'],
+    ['PORT 0', { PORT: '0' }, 'Invalid PORT'],
+    ['PORT not a number', { PORT: 'abc' }, 'Invalid PORT'],
+    ['PORT too big', { PORT: '70000' }, 'Invalid PORT'],
+  ])('main exits 1: %s', (_name, env, message) => {
+    const r = runMain(env);
     expect(r.status, r.stderr).toBe(1);
-    expect(r.stderr).toContain('ICRM_API_TOKEN');
+    expect(r.stderr).toContain(message);
+    expect(r.stderr).not.toContain(VALID_TOKEN);
   }, 90_000);
 });

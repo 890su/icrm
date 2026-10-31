@@ -388,9 +388,10 @@ function guarded<T>(f: () => T): T {
   }
 }
 
+/** Integers 0..MAX_SAFE_INTEGER; anything bigger would only fail later as a Postgres data exception. */
 function pagingValue(name: string, v: number | undefined, fallback: number): number {
   if (v === undefined) return fallback;
-  if (!Number.isInteger(v) || v < 0) throw new QueryError('type', `${name} должен быть неотрицательным целым числом`);
+  if (!Number.isSafeInteger(v) || v < 0) throw new QueryError('type', `${name} должен быть неотрицательным целым числом`);
   return v;
 }
 

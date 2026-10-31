@@ -9,12 +9,21 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-const databaseUrl = process.env.DATABASE_URL ?? fail('DATABASE_URL is required');
-const apiToken = process.env.ICRM_API_TOKEN ?? fail('ICRM_API_TOKEN is required');
-const configDir = process.env.ICRM_CONFIG_DIR ?? fileURLToPath(new URL('../../../config', import.meta.url));
-const host = process.env.HOST ?? '127.0.0.1';
-const port = Number(process.env.PORT ?? 3100);
-if (!Number.isInteger(port) || port < 0 || port > 65535) fail(`Invalid PORT: ${process.env.PORT}`);
+const MIN_TOKEN_LENGTH = 16;
+
+/** An env value; empty counts as unset. */
+const env = (name: string): string | undefined => {
+  const v = process.env[name];
+  return v === undefined || v === '' ? undefined : v;
+};
+
+const databaseUrl = env('DATABASE_URL') ?? fail('DATABASE_URL is required');
+const apiToken = env('ICRM_API_TOKEN') ?? fail('ICRM_API_TOKEN is required');
+if (apiToken.length < MIN_TOKEN_LENGTH) fail(`ICRM_API_TOKEN must be at least ${MIN_TOKEN_LENGTH} characters`);
+const configDir = env('ICRM_CONFIG_DIR') ?? fileURLToPath(new URL('../../../config', import.meta.url));
+const host = env('HOST') ?? '127.0.0.1';
+const port = Number(env('PORT') ?? 3100);
+if (!Number.isInteger(port) || port < 1 || port > 65535) fail(`Invalid PORT: ${env('PORT')}`);
 
 // The config is checked before anything touches the database.
 const cfg = await loadConfigDir(configDir).catch((e: unknown) => {
@@ -37,7 +46,13 @@ syncConfig(db, cfg, workspaceId, () => new Date()).then(
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
-    void app.close().then(() => db.destroy()).then(() => process.exit(0));
+    app.close().then(() => db.destroy()).then(
+      () => process.exit(0),
+      (err: unknown) => {
+        console.error('shutdown failed', err);
+        process.exit(1);
+      },
+    );
   });
 }
 

@@ -246,6 +246,9 @@ describe('errors', () => {
     await reject({ limit: -1 }).toMatchObject({ code: 'type' });
     await reject({ offset: -1 }).toMatchObject({ code: 'type' });
     await reject({ limit: 1.5 }).toMatchObject({ code: 'type' });
+    await reject({ offset: 1e20 }).toMatchObject({ code: 'type' });
+    await reject({ offset: Number.MAX_SAFE_INTEGER + 1 }).toMatchObject({ code: 'type' });
+    await reject({ limit: Infinity }).toMatchObject({ code: 'type' });
     await reject({ sort: [{ field: 'nope', dir: 'asc' }] }).toMatchObject({ code: 'type' });
   });
 

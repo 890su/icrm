@@ -19,10 +19,22 @@ export interface ServerOptions {
   logger?: FastifyServerOptions['logger'];
 }
 
+/** Clients that send `Content-Type: application/json` with no body (archive, query) get `undefined`, not a 400. */
+function acceptEmptyJsonBody(app: FastifyInstance): void {
+  const parseJson = app.getDefaultJsonParser('error', 'error');
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    const text = body.toString();
+    if (text.trim() === '') done(null, undefined);
+    else parseJson(req, text, done);
+  });
+}
+
 /** Thin HTTP layer over RecordService / queryRecords; every route needs the bearer token. */
 export function buildServer(o: ServerOptions): FastifyInstance {
   const now = o.now ?? ((): Date => new Date());
   const app = Fastify({ logger: o.logger ?? false });
+  acceptEmptyJsonBody(app);
   registerErrorHandling(app);
   registerAuth(app, o.apiToken);
 

@@ -27,6 +27,13 @@ export function sendSaved(reply: FastifyReply, res: SaveResult, okStatus: number
 const isRetryable = (e: unknown): boolean =>
   typeof e === 'object' && e !== null && 'code' in e && (e.code === '40P01' || e.code === '40001');
 
+/**
+ * Postgres class 22 (data exception): well-formed JSON carrying a value the database cannot store or
+ * compare (NUL characters, numbers out of range, ...). The caller's input is at fault, not the server.
+ */
+const isDataException = (e: unknown): boolean =>
+  typeof e === 'object' && e !== null && 'code' in e && typeof e.code === 'string' && e.code.startsWith('22');
+
 /** Maps whatever a route throws to the API's error bodies; unexpected errors never leak their message. */
 export function registerErrorHandling(app: FastifyInstance): void {
   app.setNotFoundHandler((_req, reply) => reply.code(404).send(notFoundBody('Маршрут не найден')));
@@ -41,6 +48,9 @@ export function registerErrorHandling(app: FastifyInstance): void {
     }
     if (isRetryable(err)) {
       return reply.code(409).send(oneError('version_conflict', 'Конфликт одновременных изменений, повторите'));
+    }
+    if (isDataException(err)) {
+      return reply.code(400).send(oneError('bad_request', 'Значение запроса недопустимо (например, символ NUL или число вне диапазона)'));
     }
     // Fastify's own client errors (malformed JSON, unsupported content type, body too large).
     const status = (err as { statusCode?: unknown }).statusCode;
