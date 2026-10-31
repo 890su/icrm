@@ -23,12 +23,25 @@ const MAX_IDENTIFIER = 63;
 const renameMarker = (from: string, to: string): string => `${from}→${to}`;
 
 /**
+ * What a computed field's stored values depend on in the config: its definition `signature`, its value
+ * type (which follows the types of its inputs) and the sets it belongs to (which decide the records that
+ * have it). Undefined for plain fields. A stored value in any other form (e.g. a bare `signature` written
+ * by an older version) simply differs, so the field is recomputed once.
+ */
+export function syncSignature(cfg: CompiledConfig, key: string): string | undefined {
+  const f = cfg.fields.get(key);
+  if (f?.signature === undefined) return undefined;
+  const sets = [...(cfg.setsOfField.get(key) ?? [])].sort();
+  return JSON.stringify({ signature: f.signature, valueType: f.valueType, sets });
+}
+
+/**
  * Brings the database in line with the config (spec §1.11), for one workspace. Safe to run at every start:
  * a second run with the same config changes nothing.
  *
  * 1. `was:` renames: the key moves inside `records.data` and `links.field_key`, once per `was→key` pair.
  * 2. Orphan keys (in `data`, not in the config) are reported; the data stays.
- * 3. Formula/rollup fields whose definition `signature` differs from the stored one are marked
+ * 3. Formula/rollup fields whose `syncSignature` differs from the stored one are marked
  *    `recomputing`, recomputed for the records that have the field, then stored as `ok`. If the
  *    recomputation fails the mark stays and the next run recomputes again.
  * 4. Fields with `indexed: true` get an expression index on `data->>'<key>'`.
@@ -42,18 +55,18 @@ export async function syncConfig(
   const stored = await db.selectFrom('config_state').select(['key', 'value', 'status'])
     .where('workspace_id', '=', workspaceId).where('kind', '=', 'signature').execute();
   const storedBy = new Map(stored.map((r) => [r.key, r]));
-  const stale = [...cfg.fields.values()]
-    .filter((f) => {
-      if (f.signature === undefined) return false;
-      const was = storedBy.get(f.key);
-      return was === undefined || was.value !== f.signature || was.status !== 'ok';
+  const stale = [...cfg.fields.keys()]
+    .filter((key) => {
+      const signature = syncSignature(cfg, key);
+      if (signature === undefined) return false;
+      const was = storedBy.get(key);
+      return was === undefined || was.value !== signature || was.status !== 'ok';
     })
-    .map((f) => f.key)
     .sort();
   if (stale.length > 0) {
     for (const key of stale) await markSignature(db, workspaceId, key, storedBy.get(key)?.value ?? '', 'recomputing');
     await recomputeFields(db, cfg, workspaceId, stale, now);
-    for (const key of stale) await markSignature(db, workspaceId, key, cfg.fields.get(key)!.signature!, 'ok');
+    for (const key of stale) await markSignature(db, workspaceId, key, syncSignature(cfg, key)!, 'ok');
   }
 
   const indexes = await createIndexes(db, cfg);

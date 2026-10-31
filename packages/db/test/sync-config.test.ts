@@ -2,7 +2,8 @@ import { compileConfig, parseConfigFiles, type CompiledConfig, type Value } from
 import { sql, type Kysely } from 'kysely';
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import {
-  ensureWorkspace, RecordService, recomputeFields, recomputingKeys, syncConfig, type DB, type RecordView, type SaveResult,
+  ensureWorkspace, RecordService, recomputeFields, recomputingKeys, syncConfig, syncSignature,
+  type DB, type RecordView, type SaveResult,
 } from '../src/index.js';
 import { freshDb } from './setup-pg.js';
 
@@ -261,7 +262,7 @@ describe('recompute on a changed definition', () => {
     expect(await recomputingKeys(db, ws)).toEqual([]);
     const row = await db.selectFrom('config_state').select(['value', 'status'])
       .where('workspace_id', '=', ws).where('key', '=', 'cost').where('kind', '=', 'signature').executeTakeFirstOrThrow();
-    expect(row).toEqual({ value: v2.fields.get('cost')!.signature, status: 'ok' });
+    expect(row).toEqual({ value: syncSignature(v2, 'cost'), status: 'ok' });
   });
 
   test('a failed recompute leaves the mark, and the next sync does it again', async () => {
@@ -279,6 +280,62 @@ describe('recompute on a changed definition', () => {
     expect(report.recomputed).toEqual(['cost']);
     expect(await recomputingKeys(db, ws)).toEqual([]);
     expect((await get(service(v2, ws), task.id)).data.cost).toBe(20);
+  });
+
+  test('adding an existing formula to another set recomputes it for the records of that set', async () => {
+    const V1 = `
+fields:
+  hours: {type: number, label: Часы}
+  rate: {type: number, label: Ставка}
+  cost: {type: formula, label: Стоимость, expr: '{hours} * {rate}'}
+sets:
+  task: {label: Задача, fields: [title, hours, rate, cost]}
+  job: {label: Работа, fields: [title, hours, rate]}
+`;
+    const V2 = V1.replace('fields: [title, hours, rate]}', 'fields: [title, hours, rate, cost]}');
+    const ws = await workspace();
+    const [v1, v2] = [compile(V1), compile(V2)];
+    const job = await mk(service(v1, ws), ['job'], { hours: 2, rate: 5 });
+    expect(job.data.cost ?? null).toBeNull();
+    await syncConfig(db, v1, ws, now);
+
+    const report = await syncConfig(db, v2, ws, now);
+    expect(report.recomputed).toEqual(['cost']);
+    expect((await get(service(v2, ws), job.id)).data.cost).toBe(10);
+    expect(await syncConfig(db, v2, ws, now)).toEqual(NOTHING);
+  });
+
+  test('a changed value type of a computed field recomputes it', async () => {
+    const V1 = `
+fields:
+  price: {type: number, label: Цена}
+  total: {type: formula, label: Итого, expr: '{price} * 2'}
+sets:
+  task: {label: Задача, fields: [title, price, total]}
+`;
+    const ws = await workspace();
+    const [v1, v2] = [compile(V1), compile(V1.replace('{type: number, label: Цена}', '{type: money, label: Цена}'))];
+    expect(v2.fields.get('total')!.signature).toBe(v1.fields.get('total')!.signature);
+    const task = await mk(service(v1, ws), ['task'], { price: 3 });
+    await syncConfig(db, v1, ws, now);
+    await sql`update records set data = data || '{"price": {"amount": "3", "currency": "PLN"}}'::jsonb where id = ${task.id}`.execute(db);
+
+    expect((await syncConfig(db, v2, ws, now)).recomputed).toEqual(['total']);
+    expect((await get(service(v2, ws), task.id)).data.total).toEqual({ amount: '6', currency: 'PLN' });
+  });
+
+  test('a signature stored by an older version simply triggers one recompute', async () => {
+    const ws = await workspace();
+    const cfg = compile(COST_V1);
+    const task = await mk(service(cfg, ws), ['task'], { hours: 1, rate: 10 });
+    for (const key of ['cost', 'total']) {
+      await db.insertInto('config_state')
+        .values({ workspace_id: ws, key, kind: 'signature', value: cfg.fields.get(key)!.signature!, status: 'ok' })
+        .execute();
+    }
+    expect((await syncConfig(db, cfg, ws, now)).recomputed).toEqual(['cost', 'total']);
+    expect((await get(service(cfg, ws), task.id)).data.cost).toBe(10);
+    expect(await syncConfig(db, cfg, ws, now)).toEqual(NOTHING);
   });
 
   test('recomputeFields works in batches of 500', async () => {
