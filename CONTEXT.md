@@ -5,7 +5,7 @@ status: active
 domain:
 aliases: [icrm, ай-црм, своя crm, crm разговоров]
 stack: [typescript, node, fastify, postgres, pg-boss, react, vite, docker]
-updated: 2026-10-30
+updated: 2026-10-31
 ---
 
 # iCRM
@@ -28,15 +28,18 @@ updated: 2026-10-30
 
 ## Stack
 
-TypeScript monorepo (pnpm workspaces): `core` (чистая доменная логика,
-общая для сервера и браузера), `server` (Fastify + Postgres), `worker`
-(каналы, фоновые задачи на pg-boss), `web` (React + Vite), `config/` (YAML).
+TypeScript monorepo (pnpm workspaces): `packages/core` (чистая доменная логика,
+общая для сервера и браузера), `packages/db` (Postgres: схема, сохранение записи,
+каскад итогов), `apps/server` (Fastify), `config/` (YAML). Запланированы:
+`worker` (каналы, фоновые задачи на pg-boss) и `web` (React + Vite) — пока не созданы.
 
 ## Current state
 
-Проектирование. Архитектурная спецификация:
-`docs/superpowers/specs/2026-10-30-icrm-architecture-design.md`.
-Кода ещё нет. Первый подпроект к реализации — «Ядро записей».
+Подпроект 1 «Ядро записей» реализован (ветка `feat/core-records`): `packages/core`,
+`packages/db`, `apps/server` (минимальный API `/meta`, `/records`, `/query`); стартовый
+конфиг в `config/`. Запуск и переменные окружения — `README.md`.
+Дальше: подпроект 1b «Строки записи (аналитики)» по spec §1.12, затем подпроект 2.
+Архитектурная спецификация: `docs/superpowers/specs/2026-10-30-icrm-architecture-design.md`.
 
 ## Sub-projects
 

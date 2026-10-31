@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/main.ts"
+    "dev": "tsx --env-file-if-exists=../../.env src/main.ts"
   },
   "dependencies": {
     "@icrm/core": "workspace:*",

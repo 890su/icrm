@@ -1,0 +1,47 @@
+# Starter config: an example for development. The system sets `conversation` / `contact`
+# arrive with sub-projects 2-3; `title` is built in.
+fields:
+  description: {type: text, label: Описание, multiline: true}
+  responsible: {type: user, label: Ответственный}
+  due_date: {type: date, label: Срок}
+  done: {type: bool, label: Выполнена}
+  kind: {type: enum, label: Вид работ, options: [visit, montage, supply, consult]}
+  hours: {type: number, label: Часы работ}
+  rate: {type: number, label: Ставка}
+  parent_task: {type: link, label: Родительская задача, target_sets: [task], cardinality: one, hierarchical: true, inverse_label: Подзадачи}
+  own_hours: {type: number, label: Свои часы}
+  # Recursive total over the task tree: own_hours + total_hours of every direct subtask.
+  total_hours:
+    type: rollup
+    label: Часы подзадач
+    via: parent_task
+    direction: inverse
+    field: branch_hours
+    agg: sum
+  branch_hours: {type: formula, label: Часы с подзадачами, expr: '{own_hours} + {total_hours}'}
+
+  address: {type: text, label: Адрес}
+  warranty_months: {type: number, label: 'Гарантия, мес.'}
+  act_file: {type: file, label: Акт выполненных работ}
+  work_cost: {type: formula, label: Стоимость работ, expr: '{hours} * {rate}'}
+
+sets:
+  task:
+    label: Задача
+    fields: [description, responsible, due_date, done, kind, hours, rate, parent_task, own_hours, total_hours, branch_hours]
+  montage:
+    label: Монтаж
+    activation: rule
+    requires: [task]
+    fields: [address, warranty_months, act_file, work_cost]
+
+rules:
+  - id: montage_by_kind
+    when: '{kind} = "montage"'
+    enable_set: montage
+  - id: act_required_on_done
+    when: '{done} AND HAS_SET("montage")'
+    require: [act_file]
+  - id: warranty_default
+    when: 'HAS_SET("montage")'
+    default: {warranty_months: '12'}
