@@ -13,6 +13,7 @@ import {
   archiveSeeds, changedSetKeys, evaluateWithRollups, recompute, runCascade, type CascadeSeed,
 } from './cascade.js';
 import { archived, notFound, recordError, SaveFailed, versionConflict } from './errors.js';
+import { withRetry } from './retry.js';
 
 export interface RecordView {
   id: string;
@@ -85,7 +86,9 @@ const stateOf = (r: StoredRecord): RecordState => ({ data: { ...r.data, title: r
 
 /**
  * The save pipeline: every create/update of a record goes through here, in one transaction.
- * Any error rolls the whole transaction back and comes back as `{ok: false, errors}`.
+ * Any error rolls the whole transaction back and comes back as `{ok: false, errors}`. A transaction that
+ * Postgres aborts as a deadlock victim or serialization failure is re-run from scratch (`withRetry`);
+ * after the last attempt that error is thrown.
  */
 export class RecordService {
   private readonly db: Kysely<DB>;
@@ -247,7 +250,7 @@ export class RecordService {
    * and rolls the batch back.
    */
   async recompute(ids: string[], userId: string | null, source: 'system'): Promise<RecordError[]> {
-    return this.db.transaction().execute(async (tx) => {
+    return withRetry(() => this.db.transaction().execute(async (tx) => {
       const records = await loadRecords(tx, ids, { forUpdate: true });
       const errors: RecordError[] = [];
       const seeds: CascadeSeed[] = [];
@@ -261,7 +264,7 @@ export class RecordService {
       const cascadeErrors = await runCascade(tx, this.cfg, seeds, this.now(), this.workspaceId, userId);
       if (cascadeErrors.length > 0) throw new Error(cascadeErrors.map((e) => e.message).join('; '));
       return errors;
-    });
+    }));
   }
 
   /**
@@ -341,7 +344,7 @@ export class RecordService {
 
   private async inTransaction(work: (tx: Transaction<DB>) => Promise<RecordView>): Promise<SaveResult> {
     try {
-      return { ok: true, record: await this.db.transaction().execute(work) };
+      return { ok: true, record: await withRetry(() => this.db.transaction().execute(work)) };
     } catch (e) {
       if (e instanceof SaveFailed) return { ok: false, errors: e.errors };
       throw e;

@@ -3,7 +3,7 @@ import { loadConfigDir } from '@icrm/core/node';
 import { compileConfig, parseConfigFiles, type Value } from '@icrm/core';
 import { sql, type Kysely } from 'kysely';
 import { uuidv7 } from 'uuidv7';
-import { beforeAll, describe, expect, test } from 'vitest';
+import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { RecordService, type DB, type RecordView, type SaveResult } from '../src/index.js';
 import { freshDb } from './setup-pg.js';
 
@@ -236,6 +236,66 @@ describe('RecordService.update', () => {
     expect(await other.get(a.id)).toBeNull();
     expect(await other.update({ id: a.id, userId, expectedVersion: a.version, data: { notes: 'x' } }))
       .toMatchObject({ ok: false, errors: [{ code: 'not_found' }] });
+  });
+});
+
+describe('retry on deadlock and serialization failure', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * The first `n` transactions run their work for real and then fail with Postgres error `code`, so
+   * whatever they wrote is rolled back, as after a real deadlock.
+   */
+  function failTransactions(n: number, code = '40P01') {
+    const original = db.transaction.bind(db);
+    let left = n;
+    return vi.spyOn(db, 'transaction').mockImplementation(() => {
+      const builder = original();
+      if (left <= 0) return builder;
+      left--;
+      const execute = (work: Parameters<typeof builder.execute>[0]) => builder.execute(async (tx) => {
+        await work(tx);
+        throw Object.assign(new Error('deadlock detected'), { code });
+      });
+      return { execute } as unknown as typeof builder;
+    });
+  }
+
+  const countRecords = async (): Promise<number> =>
+    (await db.selectFrom('records').select('id').where('workspace_id', '=', workspaceId).execute()).length;
+
+  test.each(['40P01', '40001'])('a save that hits %s is re-run from scratch and succeeds', async (code) => {
+    const before = await countRecords();
+    const spy = failTransactions(2, code);
+    const r = record(await svc.create({ userId, title: 'Повтор', sets: ['task'], data: { kind: 'montage' } }));
+    expect(spy).toHaveBeenCalledTimes(3);
+    expect(r).toMatchObject({ version: 1, data: { kind: 'montage', warranty_months: 12 } });
+    expect(await countRecords()).toBe(before + 1); // the failed attempts left nothing behind
+    expect(await changeLog(r.id)).toHaveLength(5);
+  });
+
+  test('after three failed attempts the error is rethrown', async () => {
+    const a = await created();
+    const spy = failTransactions(3);
+    await expect(svc.update({ id: a.id, userId, expectedVersion: a.version, data: { notes: 'x' } }))
+      .rejects.toMatchObject({ code: '40P01' });
+    expect(spy).toHaveBeenCalledTimes(3);
+    expect((await svc.get(a.id))!.version).toBe(a.version);
+  });
+
+  test('other database errors are not retried', async () => {
+    const spy = failTransactions(1, '23505');
+    await expect(svc.create({ userId, title: 'x', sets: ['task'] })).rejects.toMatchObject({ code: '23505' });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  test('recompute is retried too', async () => {
+    const a = await created({ kind: 'montage' });
+    const spy = failTransactions(1);
+    expect(await svc.recompute([a.id], null, 'system')).toEqual([]);
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });
 
