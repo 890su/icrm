@@ -145,13 +145,18 @@ export async function relink(
   await naming(l.fromId, l.field, () => ops.setLinks({ id: l.fromId, userId, field: l.field, targetIds: next }));
 }
 
-/** Runs `save` of record `recordId`; its errors name that record (and `field`, when they have none). */
-export async function naming<T>(recordId: string, field: string, save: () => Promise<T>): Promise<T> {
+/**
+ * Runs `save` of record `recordId`; its errors name that record (and `field`, when given and they have none).
+ */
+export async function naming<T>(recordId: string, field: string | null, save: () => Promise<T>): Promise<T> {
   try {
     return await save();
   } catch (e) {
     if (!(e instanceof SaveFailed)) throw e;
-    throw new SaveFailed(e.errors.map((x) => ({ ...x, recordId: x.recordId ?? recordId, field: x.field ?? field })));
+    throw new SaveFailed(e.errors.map((x) => {
+      const named = { ...x, recordId: x.recordId ?? recordId };
+      return field === null || x.field !== undefined ? named : { ...named, field };
+    }));
   }
 }
 

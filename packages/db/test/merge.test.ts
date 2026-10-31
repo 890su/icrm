@@ -198,6 +198,48 @@ test('a set of A that requires its own field is enabled on B with the value of A
   expect(log).toHaveLength(1);
 });
 
+test('a record linking A and an archived record in a many-field: the merge relinks it to B', async () => {
+  const a = await create('Arch A', ['contact']);
+  const b = await create('Arch B', ['contact']);
+  const gone = await create('Arch gone', ['contact']);
+  const c = await create('Arch C', ['contact'], {}, { friends: [gone.id, a.id] });
+  must(await rec.archive({ id: gone.id, userId }));
+  const r = await cs.merge({ sourceId: a.id, targetId: b.id, userId });
+  expect(r.ok, JSON.stringify(r)).toBe(true);
+  expect((await get(c.id)).links.friends).toEqual([gone.id, b.id]);
+});
+
+test('a record linking both A and B links B once; links between A and B are dropped, not turned into self-links', async () => {
+  const a = await create('Both A', ['contact']);
+  const b = await create('Both B', ['contact']);
+  const c = await create('Both C', ['contact'], {}, { friends: [a.id, b.id] });
+  must(await rec.setLinks({ id: b.id, userId, field: 'friends', targetIds: [a.id, c.id] }));
+  must(await rec.setLinks({ id: a.id, userId, field: 'friends', targetIds: [b.id] }));
+  must(await rec.setLinks({ id: b.id, userId, field: 'referrer', targetIds: [a.id] }));
+  const r = await cs.merge({ sourceId: a.id, targetId: b.id, userId });
+  expect(r.ok, JSON.stringify(r)).toBe(true);
+  expect((await get(c.id)).links.friends).toEqual([b.id]);
+  expect(r.ok && r.record.links).toMatchObject({ friends: [c.id], referrer: [] });
+  const self = await db.selectFrom('links').select('id').where('from_id', '=', b.id).where('to_id', '=', b.id).execute();
+  expect(self).toEqual([]);
+});
+
+test('a membership of A with a future start collapses into the active twin of B', async () => {
+  const a = await create('Future A', ['contact']);
+  const b = await create('Future B', ['contact']);
+  const x = await create('Firma Future', ['organization']);
+  const mA = await membership(a, x, { active_from: '2026-12-01', role: ['техник'] });
+  const mB = await membership(b, x);
+  const p = await cs.mergePreview(a.id, b.id);
+  expect(p.ok && p.preview.memberships).toEqual([{ id: mA.id, title: 'Future A — Firma Future', collapsesInto: mB.id }]);
+  const r = await cs.merge({ sourceId: a.id, targetId: b.id, userId });
+  expect(r.ok, JSON.stringify(r)).toBe(true);
+  const mANow = await get(mA.id);
+  expect(mANow.archivedAt).not.toBeNull();
+  expect(mANow.data.active_to).toBe('2026-12-01');
+  expect((await get(mB.id)).data.role).toEqual(['техник']);
+});
+
 test('organizations with the same NIP merge; memberships move to B', async () => {
   const a = await create('Firma NIP', ['organization'], { nip: '525-000-00-09', org_kind: 'фирма' });
   const b = await create('Firma NIP sp. z o.o.', ['organization'], { nip: '5260000011' });

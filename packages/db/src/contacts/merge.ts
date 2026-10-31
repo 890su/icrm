@@ -225,7 +225,7 @@ export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
         data[key] = a.data[key]!;
         early.add(key);
       }
-      await ops.update({ id: b.id, userId: i.userId, expectedVersion: b.version, enableSets, data });
+      await naming(b.id, null, () => ops.update({ id: b.id, userId: i.userId, expectedVersion: b.version, enableSets, data }));
     }
 
     // 1. Addresses.
@@ -292,10 +292,10 @@ export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
     }
     const takeTitle = !isEmpty(a.title) && a.title !== bNow.title && (isEmpty(bNow.title) || choice.title === 'source');
     if (Object.keys(data).length > 0 || takeTitle) {
-      await ops.update({
+      await naming(b.id, null, () => ops.update({
         id: b.id, userId: i.userId, expectedVersion: bNow.version, data,
         ...(takeTitle ? { title: a.title } : {}),
-      });
+      }));
     }
     for (const w of later) {
       const next = await w.targets();
@@ -310,7 +310,8 @@ export async function merge(d: MergeDeps, i: MergeInput): Promise<SaveResult> {
 /**
  * Spec 2a §6.2 p.3. An active membership of `A` whose partner also has an active membership of `B` collapses
  * into the latter: its addresses and the links to it move there, roles are joined (and its primary flag, when
- * that conflicts with nothing), and it is closed today and archived. Then, for a contact, an active primary
+ * that conflicts with nothing), and it is closed today (on its `active_from` when that is later) and archived.
+ * Errors of these saves name the membership they are about. Then, for a contact, an active primary
  * membership of `A` loses the flag when `B` already has one, so that re-pointing it to `B` does not conflict.
  */
 async function collapseMemberships(
@@ -323,8 +324,11 @@ async function collapseMemberships(
     if (twin === undefined) continue;
     for (const x of await d.identities.liveOf(tx, [m.id])) await d.identities.moveIn(tx, x.id, twin.id, userId);
     for (const l of await incomingOf(tx, d.workspaceId, m.id)) await relink(ops, d.workspaceId, l, m.id, twin.id, userId);
-    await ops.update({ id: m.id, userId, expectedVersion: await versionOf(tx, d.workspaceId, m.id), data: { active_to: today } });
-    await ops.archive({ id: m.id, userId });
+    // Closed today, or on its start day when it starts later (`active_to` is never before `active_from`).
+    const activeTo = m.activeFrom !== null && m.activeFrom > today ? m.activeFrom : today;
+    const version = await versionOf(tx, d.workspaceId, m.id);
+    await naming(m.id, 'active_to', () => ops.update({ id: m.id, userId, expectedVersion: version, data: { active_to: activeTo } }));
+    await naming(m.id, null, () => ops.archive({ id: m.id, userId }));
 
     const data: Record<string, Value> = {};
     const roles = [...twin.role, ...m.role.filter((r) => !twin.role.includes(r))];
@@ -334,7 +338,8 @@ async function collapseMemberships(
       if (!others.some((o) => o.id !== twin.id && o.active && o.isPrimary)) data.is_primary = true;
     }
     if (Object.keys(data).length > 0) {
-      await ops.update({ id: twin.id, userId, expectedVersion: await versionOf(tx, d.workspaceId, twin.id), data });
+      const twinVersion = await versionOf(tx, d.workspaceId, twin.id);
+      await naming(twin.id, null, () => ops.update({ id: twin.id, userId, expectedVersion: twinVersion, data }));
     }
   }
   if (kind !== 'contact') return;
@@ -342,6 +347,7 @@ async function collapseMemberships(
   if (!ofB.some((m) => m.active && m.isPrimary)) return;
   for (const m of ofA) {
     if (twins.has(m.id) || !m.active || !m.isPrimary) continue;
-    await ops.update({ id: m.id, userId, expectedVersion: await versionOf(tx, d.workspaceId, m.id), data: { is_primary: false } });
+    const version = await versionOf(tx, d.workspaceId, m.id);
+    await naming(m.id, 'is_primary', () => ops.update({ id: m.id, userId, expectedVersion: version, data: { is_primary: false } }));
   }
 }
