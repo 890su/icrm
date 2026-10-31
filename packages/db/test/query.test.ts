@@ -37,7 +37,8 @@ let svc: RecordService;
 
 interface Seed {
   title: string;
-  data?: Record<string, Value>;
+  /** Unchecked: written straight into the JSON, so it may hold values of the wrong type. */
+  data?: Record<string, unknown>;
   sets?: string[];
   archived?: boolean;
 }
@@ -393,5 +394,86 @@ describe('complexity limits, key literals and error wrapping', () => {
     const real = r.filter((v) => typeof v === 'string' && v.trim() !== '');
     expect(r.slice(0, real.length)).toEqual(real);
     expect(real).toEqual([...real].sort((x, y) => Date.parse(x as string) - Date.parse(y as string)));
+  });
+});
+
+describe('mistyped stored values (a config type change, a raw write)', () => {
+  /**
+   * Values of the wrong JSON type for their field, written straight into the JSON. `evaluate` cannot read
+   * them (they compare as nothing); SQL must agree and never fail on a cast.
+   */
+  const MISTYPED: Seed[] = [
+    { title: 'Норма', data: { hours: 2, a: 1, done: true, notes: 'камера', kind: 'visit', due_date: '2026-10-01', seen_at: '2026-10-01T08:00:00Z', price: { amount: '100', currency: 'PLN' }, extra: { amount: '50', currency: 'PLN' } } },
+    { title: 'Норма 2', data: { hours: 0.5, a: 3, done: false, notes: 'б', kind: 'montage', due_date: '2026-12-31', seen_at: '2027-01-01T00:00:00Z', price: { amount: '50', currency: 'PLN' }, extra: { amount: '50', currency: 'PLN' } } },
+    { title: 'Текст в числе', data: { hours: 'abc', a: '5', done: 'yes', notes: 5, kind: 3, due_date: 5, seen_at: 'not-a-date', price: '100', extra: { amount: 50, currency: 'PLN' } } },
+    { title: 'Строка-число', data: { hours: '5', a: true, done: 1, notes: ['камера'], due_date: 'not-a-date', seen_at: 5, price: { amount: 'abc', currency: 'PLN' }, extra: { amount: '50' } } },
+    { title: 'Почти дата', data: { hours: true, done: 'false', notes: { x: 1 }, due_date: '2026-13-45', seen_at: '2026-13-45T99:99:00Z', price: { amount: '10', currency: 5 }, extra: [1] } },
+    { title: 'Смещение', data: { hours: [1], seen_at: '2026-10-30T12:00:00+02:00', due_date: ['2026-10-01'], price: 5 } },
+    { title: 'Слово now', data: { seen_at: 'now', hours: { amount: '1' }, notes: '  ' } },
+  ];
+  let wsM: string;
+  const runM = (q: QueryInput) => queryRecords(db, cfg, wsM, q, NOW);
+
+  beforeAll(async () => {
+    wsM = (await ensureWorkspace(db, 'mistyped')).workspaceId;
+    await seed(new RecordService({ db, cfg, workspaceId: wsM, now: () => NOW }), MISTYPED);
+  });
+
+  const MISTYPED_FILTERS = [
+    ...FILTERS,
+    '{hours} > 1', '{a} = 5', '{done} = TRUE', '{notes} = "5"', 'IN({kind}, "3")', '{due_date} < TODAY()',
+    '{due_date} > DATE("2026-01-01")', '{seen_at} >= NOW()', '{seen_at} < NOW()', '{seen_at} = NOW()',
+    '{price} >= {extra}', 'IS_EMPTY({seen_at})', 'NOT({hours} > 1)', 'CONTAINS({notes}, "кам")',
+  ];
+
+  test.each(MISTYPED_FILTERS)('filter %s matches evaluate and does not fail', async (f) => {
+    const all = await storedRecords(wsM);
+    expect(all).toHaveLength(MISTYPED.length);
+    const expected = all.filter((r) => evaluate(parse(f), ctxOf(r)) === true).map((r) => r.id).sort();
+    const got = (await runM({ filter: f, limit: 500 })).items.map((i) => i.id).sort();
+    expect(got).toEqual(expected);
+  });
+
+  test('a mistyped number does not hide the other matches', async () => {
+    expect((await runM({ filter: '{hours} > 1', limit: 500 })).items.map((i) => i.title)).toEqual(['Норма']);
+  });
+
+  /** Whether the SQL sort can read `v` as a value of `type`; everything else sorts last, like empty. */
+  const readable = (type: string, v: Value | undefined): boolean => {
+    switch (type) {
+      case 'number': return typeof v === 'number';
+      case 'bool': return typeof v === 'boolean';
+      case 'datetime': return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v) && !Number.isNaN(Date.parse(v));
+      case 'money': return typeof v === 'object' && v !== null && !Array.isArray(v)
+        && typeof v.amount === 'string' && /^-?\d+(\.\d+)?$/.test(v.amount) && typeof v.currency === 'string';
+      default: return typeof v === 'string' && v.trim() !== ''; // text, date
+    }
+  };
+  const sortKey = (type: string, v: Value | undefined): number | string => {
+    switch (type) {
+      case 'number': return v as number;
+      case 'bool': return Number(v);
+      case 'datetime': return Date.parse(v as string);
+      case 'money': return Number((v as { amount: string }).amount);
+      default: return v as string;
+    }
+  };
+
+  test.each([
+    ['hours', 'number'], ['a', 'number'], ['done', 'bool'], ['notes', 'text'], ['kind', 'text'],
+    ['due_date', 'date'], ['seen_at', 'datetime'], ['price', 'money'],
+  ])('sort by %s (%s) does not fail; unreadable values sort last, like empty', async (field, type) => {
+    for (const dir of ['asc', 'desc'] as const) {
+      const items = (await runM({ sort: [{ field, dir }], limit: 500 })).items;
+      expect(items).toHaveLength(MISTYPED.length);
+      const flags = items.map((i) => readable(type, i.data[field]));
+      const firstUnreadable = flags.indexOf(false);
+      expect(flags.slice(firstUnreadable === -1 ? flags.length : firstUnreadable).every((x) => !x), `${field} ${dir}`).toBe(true);
+      if (type !== 'text' && type !== 'date') { // text order follows the database collation
+        const keys = items.filter((_, n) => flags[n]).map((i) => sortKey(type, i.data[field]));
+        const sorted = [...keys].sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+        expect(keys, `${field} ${dir}`).toEqual(dir === 'asc' ? sorted : sorted.reverse());
+      }
+    }
   });
 });

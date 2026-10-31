@@ -54,6 +54,8 @@ interface Val {
    * Anything else (a nested comparison, IN, ...) is emitted once and referenced by `bind`.
    */
   leaf: boolean;
+  /** A field access: the stored JSON value itself, which emptiness is judged by (as `isEmpty` does). */
+  raw?: Sql;
 }
 
 const MAX_FILTER_LENGTH = 2000;
@@ -63,6 +65,18 @@ const TOO_COMPLEX = 'фильтр слишком сложный';
 // JS `String.prototype.trim` whitespace: tab, LF, VT, FF, CR, space, NBSP, Zs, LS, PS, BOM.
 // (`btrim` would only strip plain spaces.)
 const BLANK_RE = '^[\\t\\n\\u000b\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]*$';
+
+/** `isMoney`'s amount format. */
+const AMOUNT_RE = '^-?[0-9]+(\\.[0-9]+)?$';
+/** `compareValues` compares two strings as instants only when both look like this (and parse). */
+const DATETIME_RE = '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}';
+
+/**
+ * TRUE when text `s` is a datetime both sides agree on: it looks like one (as `compareValues` requires)
+ * and Postgres can cast it, so a cast guarded by this never throws. NULL counts as not one.
+ */
+const castableInstant = (s: Sql): Sql =>
+  sql`coalesce(${s} ~ ${DATETIME_RE}::text and pg_input_is_valid(${s}, 'timestamptz'), false)`;
 
 const CMP = {
   '=': sql.raw('='), '<>': sql.raw('<>'), '<': sql.raw('<'), '<=': sql.raw('<='), '>': sql.raw('>'), '>=': sql.raw('>='),
@@ -102,34 +116,55 @@ class FilterCompiler {
 
   // --- fields ------------------------------------------------------------------------------
 
-  /** Raw access to a stored value, typed by the config. The key is always a bound parameter. */
+  /**
+   * Access to a stored value, typed by the config. The key is a SQL literal, never a parameter.
+   * A value of the wrong JSON type for its field (left behind by a config type change or a raw write)
+   * reads as NULL, since `evaluate` cannot compare it either; every cast is guarded, so none can throw.
+   */
   fieldVal(key: string, type: ExprType): Val {
     if (!KEY_RE.test(key)) throw new QueryError('type', `Недопустимый ключ поля "${key}"`);
-    // A literal rather than a parameter, so that expression indexes on `(data->>'key')` apply.
+    // A literal rather than a parameter, so that expression indexes on `(data->>'key')` can apply.
     // KEY_RE (checked above) admits only [a-z0-9_], which cannot break out of the quotes.
     const k = sql.raw(`'${key}'`);
+    const raw = sql`(data->${k})`;
     const leaf = true;
-    if (typeof type === 'object') return { type, sql: sql`(data->${k})`, leaf };
+    const ofType = (json: 'number' | 'boolean' | 'string', value: Sql): Sql =>
+      sql`(case when jsonb_typeof(data->${k}) = ${sql.lit(json)} then ${value} end)`;
+    if (typeof type === 'object') return { type, sql: raw, leaf, raw };
     switch (type) {
       case 'null': return { type, sql: sql`null`, leaf };
-      case 'number': return { type, sql: sql`((data->>${k})::numeric)`, leaf };
-      case 'bool': return { type, sql: sql`((data->>${k})::boolean)`, leaf };
-      case 'money':
+      case 'number': return { type, sql: ofType('number', sql`(data->>${k})::numeric`), leaf, raw };
+      case 'bool': return { type, sql: ofType('boolean', sql`(data->>${k})::boolean`), leaf, raw };
+      case 'money': {
+        // `isMoney`: {amount: "<decimal>", currency: "<text>"}; anything else is not money.
+        const amount = sql`(data->${k}->>'amount')`;
+        const currency = sql`(data->${k}->>'currency')`;
+        const isText = (part: 'amount' | 'currency'): Sql => sql`jsonb_typeof(data->${k}->${sql.lit(part)}) = 'string'`;
         return {
           type,
-          sql: sql`(((data->${k})->>'amount')::numeric)`,
-          currency: sql`((data->${k})->>'currency')`,
+          sql: sql`(case when ${isText('amount')} and ${isText('currency')} and ${amount} ~ ${AMOUNT_RE}::text
+            then ${amount}::numeric end)`,
+          currency: sql`(case when ${isText('currency')} then ${currency} end)`,
           leaf,
+          raw,
         };
-      default: return { type, sql: sql`(data->>${k})`, leaf }; // text, date, datetime
+      }
+      default: return { type, sql: ofType('string', sql`(data->>${k})`), leaf, raw }; // text, date, datetime
     }
   }
 
   // --- emptiness ---------------------------------------------------------------------------
 
-  /** `isEmpty`: null, "", whitespace-only, [] (never NULL). */
+  /** `isEmpty`: null, "", whitespace-only, [] (never NULL). A field is judged by its stored JSON, whatever its type. */
   empty(v: Val): Sql {
     if (v.type === 'null') return sql`true`;
+    if (v.raw !== undefined) {
+      return sql`(case jsonb_typeof(${v.raw})
+        when 'string' then (${v.raw} #>> '{}') ~ ${BLANK_RE}::text
+        when 'array' then jsonb_array_length(${v.raw}) = 0
+        when 'null' then true
+        else ${v.raw} is null end)`;
+    }
     if (typeof v.type === 'object') {
       return sql`(case jsonb_typeof(${v.sql})
         when 'array' then jsonb_array_length(${v.sql}) = 0
@@ -215,7 +250,10 @@ class FilterCompiler {
           inner = sql`(${l.sql} collate "C") ${o} (${r.sql} collate "C")`;
           break;
         case 'datetime':
-          inner = sql`${l.sql}::timestamptz ${o} ${r.sql}::timestamptz`;
+          // Like `compareValues`: by instant when both sides are datetimes, otherwise as text.
+          inner = sql`(case when ${castableInstant(l.sql)} and ${castableInstant(r.sql)}
+            then ${l.sql}::timestamptz ${o} ${r.sql}::timestamptz
+            else (${l.sql} collate "C") ${o} (${r.sql} collate "C") end)`;
           break;
         case 'money':
           inner = sql`(case when ${l.currency} <> ${r.currency} then null else ${l.sql} ${o} ${r.sql} end)`;
@@ -372,11 +410,15 @@ function sortTerm(cfg: CompiledConfig, compiler: FilterCompiler, field: string, 
   const direction = dir === 'asc' ? sql`asc` : sql`desc`;
   if (field === 'title') return sql`records.title ${direction} nulls last`;
   const v = compiler.fieldVal(field, t);
-  if (t === 'text' || t === 'date' || t === 'datetime') {
-    // Blank text counts as empty and sorts last like NULL (and is never cast to a timestamp).
-    const value = t === 'datetime' ? sql`${v.sql}::timestamptz` : v.sql;
-    return sql`(case when ${compiler.empty(v)} then null else ${value} end) ${direction} nulls last`;
+  if (t === 'datetime') {
+    // Anything that is not a castable datetime (blank, mistyped, malformed) sorts last like NULL.
+    return sql`(case when ${castableInstant(v.sql)} then ${v.sql}::timestamptz end) ${direction} nulls last`;
   }
+  if (t === 'text' || t === 'date') {
+    // Blank text counts as empty and sorts last like NULL.
+    return sql`(case when ${compiler.empty(v)} then null else ${v.sql} end) ${direction} nulls last`;
+  }
+  // number, bool, money: a mistyped value already reads as NULL.
   return sql`${v.sql} ${direction} nulls last`;
 }
 

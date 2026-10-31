@@ -28,8 +28,9 @@ const isRetryable = (e: unknown): boolean =>
   typeof e === 'object' && e !== null && 'code' in e && (e.code === '40P01' || e.code === '40001');
 
 /**
- * Postgres class 22 (data exception): well-formed JSON carrying a value the database cannot store or
- * compare (NUL characters, numbers out of range, ...). The caller's input is at fault, not the server.
+ * Postgres class 22 (data exception): usually well-formed JSON carrying a value the database cannot store or
+ * compare (NUL characters, numbers out of range, ...), but possibly a cast over stored data the query
+ * compiler failed to guard, so it is logged.
  */
 const isDataException = (e: unknown): boolean =>
   typeof e === 'object' && e !== null && 'code' in e && typeof e.code === 'string' && e.code.startsWith('22');
@@ -50,7 +51,8 @@ export function registerErrorHandling(app: FastifyInstance): void {
       return reply.code(409).send(oneError('version_conflict', 'Конфликт одновременных изменений, повторите'));
     }
     if (isDataException(err)) {
-      return reply.code(400).send(oneError('bad_request', 'Значение запроса недопустимо (например, символ NUL или число вне диапазона)'));
+      req.log.warn({ code: (err as { code: string }).code, message: (err as Error).message }, 'data exception mapped to 400');
+      return reply.code(400).send(oneError('bad_request', 'Недопустимое значение в запросе или в данных'));
     }
     // Fastify's own client errors (malformed JSON, unsupported content type, body too large).
     const status = (err as { statusCode?: unknown }).statusCode;

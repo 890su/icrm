@@ -315,6 +315,29 @@ describe('malformed requests are 400, never 500', () => {
 });
 
 describe('error mapping', () => {
+  test('a Postgres data exception → 400 with a generic message, logged as a warning', async () => {
+    const lines: string[] = [];
+    const fresh = await freshDb();
+    const logged = buildServer({
+      db: fresh.db, cfg: await loadConfigDir(fixture('ok')), workspaceId: fresh.workspaceId, systemUserId: fresh.userId,
+      apiToken: TOKEN, logger: { level: 'warn', stream: { write: (line: string) => { lines.push(line); } } },
+    });
+    try {
+      const r = await logged.inject({
+        method: 'POST', url: '/records', payload: { title: 'a\u0000b' }, headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(r.statusCode).toBe(400);
+      expect(r.json().errors).toEqual([{ code: 'bad_request', message: 'Недопустимое значение в запросе или в данных' }]);
+      const warnings = lines.map((l) => JSON.parse(l) as { level: number; code?: string; msg?: string })
+        .filter((l) => l.level === 40);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]!.code).toMatch(/^22/);
+      expect(warnings[0]!.msg).toContain('data exception');
+    } finally {
+      await logged.close();
+    }
+  });
+
   test('unknown route → 404', async () => {
     const r = await get('/nope');
     expect(r.statusCode).toBe(404);
