@@ -126,6 +126,18 @@ test('relinking a membership to a contact who already works there is rejected an
   expect((await rec.get(mAnna.id))!.links.organization).toEqual([firmaY.id]);
 });
 
+test('relinking a membership\'s contact to one who already works there is rejected and rolled back', async () => {
+  const jan = await person('Jan C'); const anna = await person('Anna C');
+  const firmaX = await firm('Firma CX');
+  const mJan = await membership(jan, firmaX); const mAnna = await membership(anna, firmaX);
+  expect(await rec.setLinks({ id: mAnna.id, userId, field: 'contact', targetIds: [jan.id] }))
+    .toEqual({ ok: false, errors: [expect.objectContaining({ code: 'membership_active_exists' })] });
+  const after = (await rec.get(mAnna.id))!;
+  expect(after.links.contact).toEqual([anna.id]);
+  expect(after.version).toBe(mAnna.version);
+  expect((await rec.get(jan.id))!.memberships!.map((m) => m.id)).toEqual([mJan.id]);
+});
+
 test('one primary active membership per contact', async () => {
   const c = await person('Primary'); const o1 = await firm('P1'); const o2 = await firm('P2'); const o3 = await firm('P3');
   const first = await membership(c, o1, { is_primary: true });
