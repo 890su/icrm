@@ -20,7 +20,7 @@ fields:
     agg: sum
   branch_hours: {type: formula, label: Часы с подзадачами, expr: '{own_hours} + {total_hours}'}
 
-  site_address: {type: text, label: Адрес объекта, was: address}
+  site_address: {type: text, label: Адрес объекта}
   warranty_months: {type: number, label: 'Гарантия, мес.'}
   act_file: {type: file, label: Акт выполненных работ}
   work_cost: {type: formula, label: Стоимость работ, expr: '{hours} * {rate}'}

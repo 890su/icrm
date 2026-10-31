@@ -64,7 +64,8 @@ describe('starter config (config/)', () => {
 describe('starter config: contacts (contacts.yaml)', () => {
   test('starter config extends roles and renames montage address', () => {
     expect(cfg.fields.get('role')!.options).toContain('жена');
-    expect(cfg.fields.get('site_address')!.was).toBe('address');
+    expect(cfg.sets.get('montage')!.fields).toContain('site_address');
+    expect(cfg.sets.get('montage')!.fields).not.toContain('address');
     expect(cfg.fields.get('address')!.system).toBe(true);
   });
 });

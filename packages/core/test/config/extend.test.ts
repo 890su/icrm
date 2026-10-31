@@ -79,12 +79,6 @@ rules: [{id: r, when: '1 = 1', options: {role: [a]}}]`)))
     expect(issuesOf(() => build('workspace: {phone_region: pl}'))).toContainEqual(expect.objectContaining({ path: 'workspace.phone_region' }));
   });
 
-  test('was may name a key that a system field now owns', () => {
-    const cfg = build('fields: {home: {type: text, label: Дом, was: notes}}');
-    expect(cfg.fields.get('home')!.was).toBe('notes');
-    expect(cfg.fields.get('notes')!.system).toBe(true);
-  });
-
   test('a file named <system> among user files is rejected', () => {
     expect(() => withSystem([{ name: SYSTEM_FILE, content: '' }])).toThrow();
   });

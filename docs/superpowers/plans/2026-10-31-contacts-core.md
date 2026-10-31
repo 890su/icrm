@@ -176,7 +176,7 @@ test('a file named <system> among user files is rejected', () => {
 **Files:**
 - Modify: `packages/core/src/config/system.ts` (`SYSTEM_CONFIG`), `packages/core/src/node.ts`
 - Modify (переименование конфликтующих ключей в тестовых конфигах, которые грузятся через `loadConfigDir`, и в тестах, которые на них ссылаются): `packages/db/test/fixtures/config/montage.yaml` (набор `contact` → `person`, поле `notes` → `memo`), `packages/db/test/fixtures/cascade/config.yaml` (набор `contact` → `person`), `apps/server/test/fixtures/ok/config.yaml` и `broken/*.yaml` (`notes` → `memo`, набор `contact` → `person`), `packages/core/test/node.test.ts` (ожидаемый список ключей)
-- Modify: `config/tasks.yaml` (`address` → `site_address` с `was: address`), Create: `config/contacts.yaml`
+- Modify: `config/tasks.yaml` (`address` → `site_address` без `was:`), Create: `config/contacts.yaml`
 - Test: `packages/core/test/config/system.test.ts`, `starter-config.test.ts`
 
 **Interfaces:**
@@ -247,7 +247,7 @@ test('is_active: empty or future end is active, past end is not', () => { /* act
 // starter-config.test.ts (дополнить)
 test('starter config extends roles and renames montage address', () => {
   expect(cfg.fields.get('role')!.options).toContain('жена');
-  expect(cfg.fields.get('site_address')!.was).toBe('address');
+  expect(cfg.sets.get('montage')!.fields).toContain('site_address');
   expect(cfg.fields.get('address')!.system).toBe(true);
 });
 ```
