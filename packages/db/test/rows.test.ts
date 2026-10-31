@@ -12,9 +12,9 @@ const NOW = new Date('2026-10-31T10:00:00Z');
 let db: Kysely<DB>;
 let userId: string;
 let svc: RecordService;
+let workspaceId: string;
 
 beforeAll(async () => {
-  let workspaceId: string;
   ({ db, workspaceId, userId } = await freshDb());
   const cfg = await loadConfigDir(CONFIG_DIR);
   svc = new RecordService({ db, cfg, workspaceId, now: () => NOW });
@@ -356,5 +356,159 @@ describe('row errors', () => {
     ] } }));
     expect(changed.links.primary_expense).toEqual([row.id]);
     expect(await must(row.id)).toMatchObject({ data: { amount: 3 } });
+  });
+});
+
+describe('row deletion and owner lifecycle', () => {
+  const archiveLog = async (id: string) => (await changeLog(id)).filter((e) => e.kind === 'archive');
+
+  test('delete op archives the row and drops it from the owner', async () => {
+    const { owner: o, a: { id: a }, b: { id: b } } = await taskWithRows();
+    const res = record(await svc.update({ id: o.id, userId, expectedVersion: o.version, rows: { expenses: [{ id: a, delete: true }] } }));
+    expect(res.links.expenses).toEqual([b]);
+    expect(res.data.expenses_total).toBe(5);
+    expect(res.data.transport_total).toBe(0);
+    expect(res.version).toBe(o.version + 1);
+    expect((await svc.get(a))!.archivedAt).not.toBeNull();
+    expect(await archiveLog(a)).toEqual([expect.objectContaining({ source: 'user', user_id: userId })]);
+    expect((await changeLog(o.id)).filter((e) => e.kind === 'link').at(-1)).toMatchObject({ old: [a, b], new: [b], source: 'user' });
+    // owner columns stay: the archived row is still the owner's
+    expect(await ownerOf(a)).toEqual({ ownerId: o.id, ownerField: 'expenses' });
+  });
+
+  test('delete and add in one batch; cardinality one counts the deletion', async () => {
+    const one = record(await svc.create({ userId, title: 'T', sets: ['task'], data: { rate: 1 }, rows: { primary_expense: [expense({ amount: 1 })] } }));
+    const old = one.links.primary_expense![0]!;
+    const res = record(await svc.update({ id: one.id, userId, expectedVersion: one.version, rows: { primary_expense: [
+      { id: old, delete: true }, expense({ amount: 2 }),
+    ] } }));
+    expect(res.links.primary_expense).toHaveLength(1);
+    expect(res.links.primary_expense![0]).not.toBe(old);
+    expect((await must(old)).archivedAt).not.toBeNull();
+  });
+
+  test('repeating a stale batch fails without partial changes', async () => {
+    const { owner: o, a: { id: a }, b: { id: b } } = await taskWithRows();
+    const batch = { expenses: [{ id: a, delete: true as const }, expense({ amount: 1 })] };
+    const first = record(await svc.update({ id: o.id, userId, expectedVersion: o.version, rows: batch }));
+    expect(first.links.expenses).toHaveLength(2);
+    const again = await svc.update({ id: o.id, userId, expectedVersion: first.version, rows: batch });
+    expect(again).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'archived', row: { field: 'expenses', index: 0 } })] });
+    expect(again.ok === false && again.errors).toHaveLength(1);
+    expect(await must(o.id)).toEqual(first);
+    const live = await db.selectFrom('records').select('id').where('owner_id', '=', o.id).where('archived_at', 'is', null).execute();
+    expect(live.map((r) => r.id).sort()).toEqual([b, first.links.expenses![1]!].sort());
+  });
+
+  test('a delete op of a foreign or standalone record → link_owned', async () => {
+    const { owner: o } = await taskWithRows();
+    const standalone = record(await svc.create({ userId, title: 'Сам по себе', sets: ['expense'], data: { amount: 1 } }));
+    const other = await taskWithRows();
+    const res = await svc.update({ id: o.id, userId, expectedVersion: o.version, rows: { expenses: [
+      { id: standalone.id, delete: true }, { id: other.a.id, delete: true },
+    ] } });
+    expect(res.ok === false && res.errors.map((e) => [e.code, e.row?.index])).toEqual([['link_owned', 0], ['link_owned', 1]]);
+    expect(await must(standalone.id)).toEqual(standalone);
+    expect(await must(other.a.id)).toEqual(other.a);
+  });
+
+  /** A task with rows a and b, where a also owns a sub-row through its `budget_lines`. */
+  async function nestedRows() {
+    const { owner, a, b } = await taskWithRows();
+    const a2 = record(await svc.update({ id: a.id, userId, expectedVersion: a.version, enableSets: ['budget'],
+      rows: { budget_lines: [expense({ amount: 1 })] } }));
+    const sub = a2.links.budget_lines![0]!;
+    expect(await ownerOf(sub)).toEqual({ ownerId: a.id, ownerField: 'budget_lines' });
+    return { owner: await must(owner.id), a: a2, b, sub };
+  }
+
+  test('archiving the owner archives its rows, recursively', async () => {
+    const { owner, a, b, sub } = await nestedRows();
+    const res = record(await svc.archive({ id: owner.id, userId }));
+    expect(res.archivedAt).not.toBeNull();
+    for (const id of [a.id, b.id, sub]) {
+      expect((await must(id)).archivedAt).not.toBeNull();
+      expect(await archiveLog(id)).toEqual([expect.objectContaining({ source: 'cascade', user_id: userId })]);
+    }
+    expect(await archiveLog(owner.id)).toEqual([expect.objectContaining({ source: 'user' })]);
+    // links stay
+    expect(res.links.expenses).toEqual([a.id, b.id]);
+    expect((await must(a.id)).links.budget_lines).toEqual([sub]);
+
+    // any mutation of a row of an archived owner → archived
+    const aNow = await must(a.id);
+    expect(await svc.update({ id: a.id, userId, expectedVersion: aNow.version, data: { amount: 2 } }))
+      .toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'archived' })] });
+    expect(await svc.setLinks({ id: a.id, userId, field: 'budget_lines', targetIds: [] }))
+      .toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'archived' })] });
+    expect(await svc.archive({ id: sub, userId })).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'archived' })] });
+  });
+
+  test('deleting a row archives its own rows too', async () => {
+    const { owner, a, b, sub } = await nestedRows();
+    const res = record(await svc.update({ id: owner.id, userId, expectedVersion: owner.version, rows: { expenses: [{ id: a.id, delete: true }] } }));
+    expect(res.links.expenses).toEqual([b.id]);
+    expect(await archiveLog(a.id)).toEqual([expect.objectContaining({ source: 'user' })]);
+    expect(await archiveLog(sub)).toEqual([expect.objectContaining({ source: 'cascade' })]);
+  });
+
+  test('archives of rows count against the cascade limit', async () => {
+    const cfg = await loadConfigDir(CONFIG_DIR);
+    const tight = new RecordService({ db, cfg, workspaceId, now: () => NOW, cascadeLimit: 2 });
+    const { owner, a, sub } = await nestedRows();
+    const res = await tight.archive({ id: owner.id, userId });
+    expect(res).toMatchObject({ ok: false, errors: [{ code: 'validation', message: 'каскад превысил лимит' }] });
+    expect(await must(owner.id)).toEqual(owner);
+    expect((await must(a.id)).archivedAt).toBeNull();
+    expect((await must(sub)).archivedAt).toBeNull();
+
+    const enough = new RecordService({ db, cfg, workspaceId, now: () => NOW, cascadeLimit: 3 });
+    record(await enough.archive({ id: owner.id, userId }));
+    expect((await must(sub)).archivedAt).not.toBeNull();
+  });
+
+  test('direct archive of a row updates the owner', async () => {
+    const { owner: o, a, b } = await taskWithRows();
+    const res = record(await svc.archive({ id: a.id, userId }));
+    expect(res.archivedAt).not.toBeNull();
+    const after = await must(o.id);
+    expect(after.version).toBe(o.version + 1);
+    expect(after.links.expenses).toEqual([b.id]);
+    expect(after.data).toMatchObject({ expenses_total: 5, transport_total: 0 });
+    expect((await changeLog(o.id)).filter((e) => e.kind === 'link').at(-1)).toMatchObject({ old: [a.id, b.id], new: [b.id], source: 'user' });
+    expect(await archiveLog(a.id)).toEqual([expect.objectContaining({ source: 'user' })]);
+  });
+
+  test('PUT links on an owned field reorders and deletes, never adopts', async () => {
+    const { owner: o, a: { id: a }, b: { id: b } } = await taskWithRows();
+    const standalone = record(await svc.create({ userId, title: 'Сам по себе', sets: ['expense'], data: { amount: 1 } }));
+    expect(record(await svc.setLinks({ id: o.id, userId, field: 'expenses', targetIds: [b, a] })).links.expenses).toEqual([b, a]);
+    const adopt = await svc.setLinks({ id: o.id, userId, field: 'expenses', targetIds: [b, a, standalone.id] });
+    expect(adopt).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'link_owned', field: 'expenses' })] });
+    expect(await ownerOf(standalone.id)).toEqual({ ownerId: null, ownerField: null });
+
+    // a row of another owner cannot be adopted either
+    const other = await taskWithRows();
+    expect(await svc.setLinks({ id: o.id, userId, field: 'expenses', targetIds: [b, a, other.a.id] }))
+      .toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'link_owned', field: 'expenses' })] });
+
+    const before = await must(o.id);
+    const dropped = record(await svc.setLinks({ id: o.id, userId, field: 'expenses', targetIds: [b] }));
+    expect(dropped.links.expenses).toEqual([b]);
+    expect(dropped.version).toBe(before.version + 1);
+    expect(dropped.data).toMatchObject({ expenses_total: 5, transport_total: 0 });
+    expect((await must(a)).archivedAt).not.toBeNull();
+    expect(await archiveLog(a)).toEqual([expect.objectContaining({ source: 'user' })]);
+
+    // a deleted row cannot come back
+    expect(await svc.setLinks({ id: o.id, userId, field: 'expenses', targetIds: [b, a] }))
+      .toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'link_owned', field: 'expenses' })] });
+  });
+
+  test('links on create cannot target an owned field', async () => {
+    const standalone = record(await svc.create({ userId, title: 'Сам по себе', sets: ['expense'], data: { amount: 1 } }));
+    const res = await svc.create({ userId, title: 'T', sets: ['task'], links: { expenses: [standalone.id] } });
+    expect(res).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'link_owned', field: 'expenses' })] });
+    expect(await ownerOf(standalone.id)).toEqual({ ownerId: null, ownerField: null });
   });
 });

@@ -2,7 +2,7 @@ import { ownedFieldsOf, type CompiledConfig, type RecordError, type Value } from
 import { linksFrom } from '../repo/links.js';
 import { loadRecords, type StoredRecord } from '../repo/records.js';
 import type { Db } from '../repo/types.js';
-import type { CascadeSeed } from './cascade.js';
+import type { CascadeBudget, CascadeSeed } from './cascade.js';
 import { archived, recordError, SaveFailed, versionConflict } from './errors.js';
 import type { CreateInput, Inserted, UpdateInput } from './record-service.js';
 
@@ -23,7 +23,7 @@ export interface ChangeRowOp {
   disableSets?: string[];
 }
 
-/** Deletion of an existing row (Task 5). */
+/** Deletion of an existing row of this owner and field: the row is archived and leaves the owned link. */
 export interface DeleteRowOp {
   id: string;
   delete: true;
@@ -45,6 +45,11 @@ export interface RowSteps {
   /** Evaluates and writes a row `insertIn` inserted. */
   finishCreateIn(tx: Db, userId: string, inserted: Inserted): Promise<{ seed: CascadeSeed; sets: Map<string, string> }>;
   updateIn(tx: Db, i: UpdateInput, stored: StoredRecord): Promise<{ seed: CascadeSeed; sets: Map<string, string> }>;
+  /**
+   * Archives a locked, non-archived row (logged `user`) and, recursively, the rows it owns itself (logged
+   * `cascade`, counted in `budget`); returns the seeds of every record it archived. Its links stay.
+   */
+  archiveIn(tx: Db, stored: StoredRecord, userId: string, budget: CascadeBudget): Promise<CascadeSeed[]>;
   /** Replaces the targets of the owner's link field and logs a `link` entry; null when unchanged. */
   replaceLinksLogged(tx: Db, id: string, userId: string, field: string, targetIds: string[]): Promise<LinkChange | null>;
 }
@@ -57,21 +62,21 @@ export interface RowOwner {
   sets: Map<string, string>;
 }
 
-/** What the batch wrote: seeds of every saved row, and the owner's changed owned links (for its seed). */
+/**
+ * What the batch wrote: seeds of every saved or archived row, the owner's changed owned links (for its seed),
+ * and the cascade budget the archived rows of deleted rows have used.
+ */
 export interface RowsResult {
   seeds: CascadeSeed[];
   changedLinks: LinkChange[];
+  budget: CascadeBudget;
 }
 
 /** The result of a save without `rows`; a fresh object each time, as the owner's seed takes its arrays over. */
-export const noRows = (): RowsResult => ({ seeds: [], changedLinks: [] });
+export const noRows = (): RowsResult => ({ seeds: [], changedLinks: [], budget: { spent: 0 } });
 
 const isDelete = (op: RowOp): op is DeleteRowOp => 'delete' in op && op.delete === true;
 const isChange = (op: RowOp): op is ChangeRowOp => 'id' in op && !isDelete(op);
-
-function deleteRow(): never {
-  throw new Error('row delete is Task 5');
-}
 
 /**
  * Saves the rows of an owner (spec §1.12) inside the owner's save, before the owner is evaluated, so that
@@ -84,11 +89,13 @@ function deleteRow(): never {
  *    `loadRecords(..., {forUpdate: true, workspaceId})` (id order); records of other workspaces are never
  *    locked (they are `link_owned` below). A row named twice is a `validation` error of the later op.
  * 3. Per field, in batch order: `cardinality: one` with more than one row afterwards is `link_cardinality`
- *    (with `field`). A change op must name a row of this owner and field (`link_owned`, with `field`), not
- *    archived (`archived`), at its version (`version_conflict`), and goes through `updateIn`. A new op is
+ *    (with `field`). A change or delete op must name a row of this owner and field (`link_owned`, with
+ *    `field`) that is not archived (`archived`: a deleted row stays the owner's, so re-sending a batch that
+ *    deleted it fails here). A change op must be at its version (`version_conflict`) and goes through
+ *    `updateIn`. A delete op archives the row and its own rows recursively (`archiveIn`). A new op is
  *    validated and inserted (`insertIn`, owned by the owner) but not evaluated yet.
- * 4. Each owned link becomes the stored targets (changed rows keep their places) followed by the inserted
- *    new rows in batch order, logged at the owner.
+ * 4. Each owned link becomes the stored targets without the deleted rows (changed rows keep their places)
+ *    followed by the inserted new rows in batch order, logged at the owner.
  * 5. The new rows are evaluated and written (`finishCreateIn`). They are linked by now, so their rollups
  *    over the owner (`agg: first` substitutions) see the owner's STORED values. Accepted limitation: a row
  *    rule depending on an owner value that this same save changes is checked against the owner's previous
@@ -148,6 +155,19 @@ export async function saveRows(
     }
   }
   const locked = await loadRecords(tx, [...named], { forUpdate: true, workspaceId: steps.workspaceId });
+  /** The locked existing row `id` of this owner and `field`, not archived; otherwise throws. */
+  const ownRow = (field: string, id: string): StoredRecord => {
+    const stored = locked.get(id);
+    if (stored === undefined || stored.ownerId !== owner.id || stored.ownerField !== field) {
+      const label = cfg.fields.get(field)!.label;
+      throw new SaveFailed([recordError(
+        'link_owned', `Поле «${label}»: запись ${id} не является строкой этого поля этой записи`, { field },
+      )]);
+    }
+    if (stored.archivedAt !== null) throw new SaveFailed([archived(id)]);
+    return stored;
+  };
+  const budget: CascadeBudget = { spent: 0 };
 
   const seeds: CascadeSeed[] = [];
   const inserted: { field: string; index: number; row: Inserted }[] = [];
@@ -157,23 +177,23 @@ export async function saveRows(
     const ops = rows[field]!;
     const before = await linksFrom(tx, owner.id, field);
     const added = ops.filter((op) => !('id' in op)).length;
-    if (def.cardinality === 'one' && before.length + added > 1) {
+    const dropped = new Set(ops.filter(isDelete).map((op) => op.id).filter((id) => before.includes(id)));
+    if (def.cardinality === 'one' && before.length - dropped.size + added > 1) {
       fieldErrors.set(field, [recordError('link_cardinality', `Поле «${def.label}» допускает только одну связь`, { field })]);
     }
     const newIds: string[] = [];
+    const deleted = new Set<string>();
     for (const [index, op] of ops.entries()) {
       if (opErrors.has(opKey(field, index))) continue; // a row named twice
       if (isDelete(op)) {
-        deleteRow();
+        await attempt(field, index, async () => {
+          const stored = ownRow(field, op.id);
+          seeds.push(...await steps.archiveIn(tx, stored, owner.userId, budget));
+          deleted.add(op.id);
+        });
       } else if (isChange(op)) {
         await attempt(field, index, async () => {
-          const stored = locked.get(op.id);
-          if (stored === undefined || stored.ownerId !== owner.id || stored.ownerField !== field) {
-            throw new SaveFailed([recordError(
-              'link_owned', `Поле «${def.label}»: запись ${op.id} не является строкой этого поля этой записи`, { field },
-            )]);
-          }
-          if (stored.archivedAt !== null) throw new SaveFailed([archived(op.id)]);
+          const stored = ownRow(field, op.id);
           if (stored.version !== op.version) throw new SaveFailed([versionConflict(op.id)]);
           const { seed, sets } = await steps.updateIn(tx, {
             id: op.id, userId: owner.userId, expectedVersion: op.version, title: op.title, data: op.data,
@@ -191,7 +211,7 @@ export async function saveRows(
         newIds.push(row.id);
       }
     }
-    targets.set(field, [...before, ...newIds]);
+    targets.set(field, [...before.filter((id) => !deleted.has(id)), ...newIds]);
   }
 
   // Linked before the new rows are evaluated, so that their rollups over the owner see it.
@@ -214,5 +234,5 @@ export async function saveRows(
     for (const index of rows[field]!.keys()) errors.push(...opErrors.get(opKey(field, index)) ?? []);
   }
   if (errors.length > 0) throw new SaveFailed(errors);
-  return { seeds, changedLinks };
+  return { seeds, changedLinks, budget };
 }

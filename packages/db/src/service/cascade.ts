@@ -12,6 +12,17 @@ import { fieldInEnabledSet } from './fields.js';
 /** Spec §1.8: at most this many record recomputations in the cascade of one save. */
 export const CASCADE_LIMIT = 10_000;
 
+/**
+ * What one save has spent of `CASCADE_LIMIT` before its cascade runs: rows archived because their owner
+ * was archived or deleted (spec §1.12). The cascade gets the rest.
+ */
+export interface CascadeBudget {
+  spent: number;
+}
+
+/** The error of a save whose cascade (recomputations plus archived rows) exceeds its limit. */
+export const cascadeLimitError = (): RecordError => ({ code: 'validation', message: 'каскад превысил лимит' });
+
 /** At most this many evaluations of one record while rules keep enabling sets with uncomputed rollups. */
 const MAX_ROLLUP_ROUNDS = 3;
 
@@ -226,7 +237,7 @@ export async function runCascade(
       const rec = records.get(id)!;
       if (rec.workspaceId !== workspaceId || rec.archivedAt !== null) continue;
       if (![...wave.get(id)!].some((key) => fieldInEnabledSet(cfg, rec.sets, key))) continue;
-      if (++recomputed > limit) return [{ code: 'validation', message: 'каскад превысил лимит' }];
+      if (++recomputed > limit) return [cascadeLimitError()];
       const { seed } = await recompute(tx, cfg, rec, now, workspaceId, userId);
       if (seed !== null) pending.push(seed);
     }

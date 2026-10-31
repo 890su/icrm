@@ -6,11 +6,12 @@ import { sql, type Kysely, type Transaction } from 'kysely';
 import { uuidv7 } from 'uuidv7';
 import { appendChangeLog, type ChangeEntry } from '../repo/change-log.js';
 import { ancestorsVia, linksFrom, replaceLinks } from '../repo/links.js';
-import { insertRecord, loadRecords, writeRecord, writeSets, type StoredRecord } from '../repo/records.js';
+import { insertRecord, liveRowIds, loadRecords, writeRecord, writeSets, type StoredRecord } from '../repo/records.js';
 import type { Db } from '../repo/types.js';
 import type { DB } from '../schema.js';
 import {
-  archiveSeeds, changedSetKeys, evaluateWithRollups, recompute, runCascade, type CascadeSeed,
+  archiveSeeds, CASCADE_LIMIT, cascadeLimitError, changedSetKeys, evaluateWithRollups, recompute, runCascade,
+  type CascadeBudget, type CascadeSeed,
 } from './cascade.js';
 import { archived, notFound, recordError, SaveFailed, versionConflict } from './errors.js';
 import { fieldInEnabledSet, sameValue } from './fields.js';
@@ -109,12 +110,15 @@ export class RecordService {
   private readonly cfg: CompiledConfig;
   private readonly workspaceId: string;
   private readonly now: () => Date;
+  private readonly cascadeLimit: number;
 
-  constructor(o: { db: Kysely<DB>; cfg: CompiledConfig; workspaceId: string; now?: () => Date }) {
+  /** `cascadeLimit` (default `CASCADE_LIMIT`) is the cascade limit of one save; tests lower it. */
+  constructor(o: { db: Kysely<DB>; cfg: CompiledConfig; workspaceId: string; now?: () => Date; cascadeLimit?: number }) {
     this.db = o.db;
     this.cfg = o.cfg;
     this.workspaceId = o.workspaceId;
     this.now = o.now ?? (() => new Date());
+    this.cascadeLimit = o.cascadeLimit ?? CASCADE_LIMIT;
   }
 
   async get(id: string): Promise<RecordView | null> {
@@ -135,7 +139,7 @@ export class RecordService {
         ? noRows()
         : await saveRows(this.rowSteps(), tx, { id: inserted.id, userId: i.userId, sets: inserted.sets }, i.rows);
       const { seed } = await this.finishCreateIn(tx, i.userId, inserted, batch.changedLinks);
-      await this.cascade(tx, i.userId, [...batch.seeds, seed]);
+      await this.cascade(tx, i.userId, [...batch.seeds, seed], batch.budget);
       return this.reload(tx, inserted.id);
     });
   }
@@ -153,7 +157,7 @@ export class RecordService {
         ? noRows()
         : await saveRows(this.rowSteps(), tx, { id: i.id, userId: i.userId, sets: prepared.sets }, i.rows);
       const { seed } = await this.finishUpdateIn(tx, i, stored, prepared, batch.changedLinks);
-      await this.cascade(tx, i.userId, [...batch.seeds, seed]);
+      await this.cascade(tx, i.userId, [...batch.seeds, seed], batch.budget);
       return this.reload(tx, i.id);
     });
   }
@@ -164,6 +168,10 @@ export class RecordService {
    * Setting the targets the record already has is a no-op. A change of a field the rules make `readonly`
    * (judged by the stored state, as for values) is rejected; the re-evaluation sees the new links, so a
    * rule's `require` on the field is checked against them.
+   *
+   * On an owned field (spec §1.12) `targetIds` may only reorder and drop the record's current rows
+   * (`link_owned` otherwise): the dropped rows are locked (after the record, in id order) and archived with
+   * their own rows, as by a `delete` op.
    */
   setLinks(i: SetLinksInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
@@ -172,20 +180,24 @@ export class RecordService {
       const stored = await this.lockEditable(tx, i.id);
       const errors = await this.linkErrors(tx, i.id, stored.sets, i.field, i.targetIds);
       if (errors.length > 0) throw new SaveFailed(errors);
+
+      const seeds: CascadeSeed[] = [];
+      const budget: CascadeBudget = { spent: 0 };
+      if (this.cfg.fields.get(i.field)!.owned === true) {
+        const kept = new Set(i.targetIds);
+        const dropped = (await linksFrom(tx, i.id, i.field)).filter((id) => !kept.has(id));
+        const rows = await loadRecords(tx, dropped, { forUpdate: true, workspaceId: this.workspaceId });
+        for (const row of rows.values()) {
+          if (row.archivedAt === null) seeds.push(...await this.archiveIn(tx, row, i.userId, budget));
+        }
+      }
       const change = await this.replaceLinksLogged(tx, i.id, i.userId, i.field, i.targetIds);
       if (change === null) return this.view(tx, stored);
 
-      const prev = stateOf(stored);
-      const readonly = readonlyErrors(this.cfg, prev, new Set([i.field]), this.now());
+      const readonly = readonlyErrors(this.cfg, stateOf(stored), new Set([i.field]), this.now());
       if (readonly.length > 0) throw new SaveFailed(readonly);
-      const next: RecordState = { data: { ...prev.data }, sets: new Map(prev.sets) };
-      const userChangedKeys = new Set<string>();
-      const res = await this.evaluate(tx, i.id, prev, next, userChangedKeys);
-      await this.persist(tx, stored, prev, res, i.userId, userChangedKeys, stored.version);
-      await this.cascade(tx, i.userId, [{
-        recordId: i.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
-        changedLinks: [change],
-      }]);
+      seeds.push(await this.relinkedIn(tx, stored, i.userId, change));
+      await this.cascade(tx, i.userId, seeds, budget);
       return this.reload(tx, i.id);
     });
   }
@@ -193,19 +205,32 @@ export class RecordService {
   /**
    * Archives the record (version bump, `archive` log entry) and cascades to every rollup over a link
    * touching it, in both directions: archived records drop out of rollups.
+   *
+   * Spec §1.12: the rows the record owns are archived with it, recursively (logged `cascade`, counted
+   * against the cascade limit); links stay. Archiving a row deletes it: it also leaves its owner's owned
+   * link, and the owner is re-evaluated and written (version bump, `link` entry). To keep the lock order of
+   * a batch (owner before rows), the owner of a row is locked before the row: the row's `owner_id` is read
+   * unlocked first (it never changes after insert). A row whose owner is archived is `archived`.
    */
   archive(i: ArchiveInput): Promise<SaveResult> {
     return this.inTransaction(async (tx) => {
+      const peek = (await loadRecords(tx, [i.id], { workspaceId: this.workspaceId })).get(i.id);
+      const ownerId = peek?.ownerId ?? null;
+      const owner = ownerId === null
+        ? undefined
+        : (await loadRecords(tx, [ownerId], { forUpdate: true, workspaceId: this.workspaceId })).get(ownerId);
       const stored = await this.lockEditable(tx, i.id);
-      const archivedAt = this.now();
-      if (!(await writeRecord(tx, { ...stored, archivedAt }, stored.version))) {
-        throw new SaveFailed([versionConflict(i.id)]);
+      if (owner !== undefined && owner.archivedAt !== null) throw new SaveFailed([archived(i.id)]);
+
+      const budget: CascadeBudget = { spent: 0 };
+      const seeds = await this.archiveIn(tx, stored, i.userId, budget);
+      if (owner !== undefined && stored.ownerField !== null) {
+        const field = stored.ownerField;
+        const rest = (await linksFrom(tx, owner.id, field)).filter((id) => id !== i.id);
+        const change = await this.replaceLinksLogged(tx, owner.id, i.userId, field, rest);
+        if (change !== null) seeds.push(await this.relinkedIn(tx, owner, i.userId, change));
       }
-      await appendChangeLog(tx, [{
-        workspaceId: this.workspaceId, recordId: i.id, userId: i.userId, kind: 'archive', fieldKey: null,
-        old: null, new: archivedAt.toISOString(), source: 'user',
-      }]);
-      await this.cascade(tx, i.userId, await archiveSeeds(tx, this.cfg, i.id));
+      await this.cascade(tx, i.userId, seeds, budget);
       return this.reload(tx, i.id);
     });
   }
@@ -359,6 +384,59 @@ export class RecordService {
     return { seed, sets: res.state.sets };
   }
 
+  /**
+   * Archives `stored` (locked, not archived; version bump, `archive` entry logged `user`) and then the
+   * non-archived rows it owns, recursively, level by level: each level is locked in id order after its
+   * owners (already locked), archived and logged `cascade`. Those rows count against the cascade limit in
+   * `budget` (exceeding it fails the save). Links stay. Returns the seeds (`archiveSeeds`) of every record
+   * it archived.
+   */
+  private async archiveIn(tx: Db, stored: StoredRecord, userId: string, budget: CascadeBudget): Promise<CascadeSeed[]> {
+    const archivedAt = this.now();
+    const archiveOne = async (rec: StoredRecord, source: 'user' | 'cascade'): Promise<void> => {
+      if (!(await writeRecord(tx, { ...rec, archivedAt }, rec.version))) throw new SaveFailed([versionConflict(rec.id)]);
+      await appendChangeLog(tx, [{
+        workspaceId: this.workspaceId, recordId: rec.id, userId, kind: 'archive', fieldKey: null,
+        old: null, new: archivedAt.toISOString(), source,
+      }]);
+    };
+    await archiveOne(stored, 'user');
+    const done = [stored.id];
+    let level = [stored.id];
+    while (level.length > 0) {
+      const ids = await liveRowIds(tx, level, this.workspaceId);
+      const rows = await loadRecords(tx, ids, { forUpdate: true, workspaceId: this.workspaceId });
+      level = [];
+      for (const id of ids) {
+        const row = rows.get(id);
+        if (row === undefined || row.archivedAt !== null) continue; // archived meanwhile
+        if (++budget.spent > this.cascadeLimit) throw new SaveFailed([cascadeLimitError()]);
+        await archiveOne(row, 'cascade');
+        level.push(id);
+      }
+      done.push(...level);
+    }
+    const seeds: CascadeSeed[] = [];
+    for (const id of done) seeds.push(...await archiveSeeds(tx, this.cfg, id));
+    return seeds;
+  }
+
+  /**
+   * Re-evaluates locked `stored` after its link `change` (own rollups refreshed against the new links) and
+   * writes it (version bump), logged as a user save; returns its seed.
+   */
+  private async relinkedIn(tx: Db, stored: StoredRecord, userId: string, change: LinkChange): Promise<CascadeSeed> {
+    const prev = stateOf(stored);
+    const next: RecordState = { data: { ...prev.data }, sets: new Map(prev.sets) };
+    const userChangedKeys = new Set<string>();
+    const res = await this.evaluate(tx, stored.id, prev, next, userChangedKeys);
+    await this.persist(tx, stored, prev, res, userId, userChangedKeys, stored.version);
+    return {
+      recordId: stored.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
+      changedLinks: [change],
+    };
+  }
+
   /** The steps `saveRows` runs rows through. */
   private rowSteps(): RowSteps {
     return {
@@ -367,6 +445,7 @@ export class RecordService {
       insertIn: (tx, i, owner) => this.insertIn(tx, i, owner),
       finishCreateIn: (tx, userId, inserted) => this.finishCreateIn(tx, userId, inserted, []),
       updateIn: (tx, i, stored) => this.updateIn(tx, i, stored),
+      archiveIn: (tx, stored, userId, budget) => this.archiveIn(tx, stored, userId, budget),
       replaceLinksLogged: (tx, id, userId, field, targetIds) => this.replaceLinksLogged(tx, id, userId, field, targetIds),
     };
   }
@@ -391,6 +470,8 @@ export class RecordService {
    * the field is a link of an enabled set (`unknown_field`), `cardinality: one` allows one target
    * (`link_cardinality`), each target exists in this workspace, is not archived and has one of
    * `target_sets` (`link_target`), and a hierarchical link must not close a cycle (`link_cycle`).
+   * On an owned field each target must instead be a non-archived row of record `id` and `field`
+   * (`link_owned`): a record becomes a row only through `rows` (spec §1.12).
    */
   private async linkErrors(
     tx: Db, id: string, sets: Map<string, string>, field: string, targetIds: string[],
@@ -408,7 +489,13 @@ export class RecordService {
     const loaded = await loadRecords(tx, targets);
     for (const target of targets) {
       const t = loaded.get(target);
-      if (t === undefined || t.workspaceId !== this.workspaceId) {
+      if (def.owned === true) {
+        const row = t !== undefined && t.workspaceId === this.workspaceId && t.ownerId === id && t.ownerField === field;
+        if (!row || t.archivedAt !== null) {
+          const message = `Поле «${def.label}»: запись ${target} не является строкой этого поля этой записи`;
+          errors.push(recordError('link_owned', message, { field }));
+        }
+      } else if (t === undefined || t.workspaceId !== this.workspaceId) {
         errors.push(recordError('link_target', `Поле «${def.label}»: запись ${target} не найдена`, { field }));
       } else if (t.archivedAt !== null) {
         errors.push(recordError('link_target', `Поле «${def.label}»: запись ${target} в архиве`, { field }));
@@ -458,9 +545,15 @@ export class RecordService {
     return res;
   }
 
-  /** After the originating record is written: propagates its changes to the rollups of linked records. */
-  private async cascade(tx: Db, userId: string, seeds: CascadeSeed[]): Promise<void> {
-    const errors = await runCascade(tx, this.cfg, seeds, this.now(), this.workspaceId, userId);
+  /**
+   * After the originating record is written: propagates its changes to the rollups of linked records, within
+   * what `budget` (rows archived with their owner in this save) has left of the cascade limit.
+   */
+  private async cascade(
+    tx: Db, userId: string, seeds: CascadeSeed[], budget: CascadeBudget = { spent: 0 },
+  ): Promise<void> {
+    const limit = this.cascadeLimit - budget.spent;
+    const errors = await runCascade(tx, this.cfg, seeds, this.now(), this.workspaceId, userId, limit);
     if (errors.length > 0) throw new SaveFailed(errors);
   }
 

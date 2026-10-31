@@ -63,6 +63,15 @@ export async function loadRecords(
   return out;
 }
 
+/** Ids of the non-archived rows owned by any of `ownerIds` in the workspace, in id order; not locked. */
+export async function liveRowIds(tx: Db, ownerIds: string[], workspaceId: string): Promise<string[]> {
+  if (ownerIds.length === 0) return [];
+  const rows = await tx.selectFrom('records').select('id')
+    .where('owner_id', 'in', ownerIds).where('workspace_id', '=', workspaceId).where('archived_at', 'is', null)
+    .orderBy('id').execute();
+  return rows.map((r) => r.id);
+}
+
 export async function insertRecord(
   tx: Db,
   r: {
