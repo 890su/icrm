@@ -41,9 +41,17 @@ extend:
     expect(cfg.fields.get('role')).toMatchObject({ label: 'Должность в семье', options: ['муж', 'жена'] });
   });
 
-  test('a rule may use options added by extend', () => {
+  test('rules are checked against options replaced by extend', () => {
+    // `муж` exists only in the extended options, `нет` in neither list
     expect(() => build(`extend: {fields: {role: {options: [муж]}}}
-rules: [{id: r, when: 'CONTAINS({role}, "муж")', require: [notes]}]`)).not.toThrow();
+rules: [{id: r, when: '1 = 1', options: {role: [муж]}}]`)).not.toThrow();
+    expect(issuesOf(() => build(`extend: {fields: {role: {options: [муж]}}}
+rules: [{id: r, when: '1 = 1', options: {role: [нет]}}]`)))
+      .toContainEqual(expect.objectContaining({ path: 'rules[0].options.role', message: expect.stringContaining('нет') }));
+    // the original option `a` is replaced, so it is outside the extended options
+    expect(issuesOf(() => build(`extend: {fields: {role: {options: [муж]}}}
+rules: [{id: r, when: '1 = 1', options: {role: [a]}}]`)))
+      .toContainEqual(expect.objectContaining({ path: 'rules[0].options.role' }));
   });
 
   test.each([
