@@ -1,0 +1,4 @@
+fields:
+  notes: {type: text, label: Заметки}
+sets:
+  task: {label: Задача, fields: [title, notes]}

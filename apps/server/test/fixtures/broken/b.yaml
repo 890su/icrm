@@ -1,0 +1,2 @@
+sets:
+  contact: {label: Контакт, fields: [no_such_field]}

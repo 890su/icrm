@@ -1,11 +1,7 @@
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
 import type { TestProject } from 'vitest/node';
 
-declare module 'vitest' {
-  export interface ProvidedContext {
-    pgUri: string;
-  }
-}
+// The ProvidedContext augmentation for 'pgUri' is declared in setup-pg.ts.
 
 /** One postgres container per test run; test files get their own database via freshDb(). */
 export default async function setup(project: TestProject): Promise<() => Promise<void>> {

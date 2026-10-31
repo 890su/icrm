@@ -1,0 +1,17 @@
+workspace:
+  timezone: Europe/Warsaw
+fields:
+  notes: {type: text, label: Заметки}
+  done: {type: bool, label: Выполнена}
+  act_file: {type: file, label: Акт}
+  related: {type: link, label: Связанные задачи, target_sets: [task]}
+sets:
+  task: {label: Задача, fields: [title, notes, done, related]}
+  montage:
+    label: Монтаж
+    requires: [task]
+    fields: [act_file]
+rules:
+  - id: act_required_on_done
+    when: '{done} AND HAS_SET("montage")'
+    require: [act_file]

@@ -4,6 +4,14 @@ import pg from 'pg';
 import { afterAll, inject } from 'vitest';
 import { createDb, ensureWorkspace, migrateToLatest, type DB } from '../src/index.js';
 
+// Set by global-setup.ts. Declared here so that it travels with the .d.ts of this module,
+// which is how other packages (apps/server) see it when they import `@icrm/db/testing`.
+declare module 'vitest' {
+  export interface ProvidedContext {
+    pgUri: string;
+  }
+}
+
 const opened: Kysely<DB>[] = [];
 
 // Importing this module from a test file registers the cleanup for that file.
