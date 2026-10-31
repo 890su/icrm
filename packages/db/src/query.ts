@@ -49,7 +49,16 @@ interface Val {
   type: ExprType;
   sql: Sql;
   currency?: Sql;
+  /**
+   * A literal, a field access or a column reference: small, so it may be repeated in the SQL.
+   * Anything else (a nested comparison, IN, ...) is emitted once and referenced by `bind`.
+   */
+  leaf: boolean;
 }
+
+const MAX_FILTER_LENGTH = 2000;
+const MAX_FILTER_DEPTH = 32;
+const TOO_COMPLEX = 'фильтр слишком сложный';
 
 // JS `String.prototype.trim` whitespace: tab, LF, VT, FF, CR, space, NBSP, Zs, LS, PS, BOM.
 // (`btrim` would only strip plain spaces.)
@@ -96,19 +105,23 @@ class FilterCompiler {
   /** Raw access to a stored value, typed by the config. The key is always a bound parameter. */
   fieldVal(key: string, type: ExprType): Val {
     if (!KEY_RE.test(key)) throw new QueryError('type', `Недопустимый ключ поля "${key}"`);
-    const k = sql`${key}::text`;
-    if (typeof type === 'object') return { type, sql: sql`(data->${k})` };
+    // A literal rather than a parameter, so that expression indexes on `(data->>'key')` apply.
+    // KEY_RE (checked above) admits only [a-z0-9_], which cannot break out of the quotes.
+    const k = sql.raw(`'${key}'`);
+    const leaf = true;
+    if (typeof type === 'object') return { type, sql: sql`(data->${k})`, leaf };
     switch (type) {
-      case 'null': return { type, sql: sql`null` };
-      case 'number': return { type, sql: sql`((data->>${k})::numeric)` };
-      case 'bool': return { type, sql: sql`((data->>${k})::boolean)` };
+      case 'null': return { type, sql: sql`null`, leaf };
+      case 'number': return { type, sql: sql`((data->>${k})::numeric)`, leaf };
+      case 'bool': return { type, sql: sql`((data->>${k})::boolean)`, leaf };
       case 'money':
         return {
           type,
           sql: sql`(((data->${k})->>'amount')::numeric)`,
           currency: sql`((data->${k})->>'currency')`,
+          leaf,
         };
-      default: return { type, sql: sql`(data->>${k})` }; // text, date, datetime
+      default: return { type, sql: sql`(data->>${k})`, leaf }; // text, date, datetime
     }
   }
 
@@ -135,14 +148,14 @@ class FilterCompiler {
 
   val(e: Expr): Val {
     switch (e.k) {
-      case 'num': return { type: 'number', sql: sql`${e.v}::numeric` };
-      case 'str': return { type: 'text', sql: sql`${e.v}::text` };
-      case 'bool': return { type: 'bool', sql: sql`${e.v}::boolean` };
-      case 'null': return { type: 'null', sql: sql`null` };
+      case 'num': return { type: 'number', sql: sql`${e.v}::numeric`, leaf: true };
+      case 'str': return { type: 'text', sql: sql`${e.v}::text`, leaf: true };
+      case 'bool': return { type: 'bool', sql: sql`${e.v}::boolean`, leaf: true };
+      case 'null': return { type: 'null', sql: sql`null`, leaf: true };
       case 'field': return this.field(e);
       case 'neg': {
         const n = constNumber(e);
-        return n === undefined ? unsupported('Унарный минус', e) : { type: 'number', sql: sql`${n}::numeric` };
+        return n === undefined ? unsupported('Унарный минус', e) : { type: 'number', sql: sql`${n}::numeric`, leaf: true };
       }
       case 'bin': return this.binary(e);
       case 'call': return this.call(e);
@@ -160,9 +173,9 @@ class FilterCompiler {
   private binary(e: Expr & { k: 'bin' }): Val {
     if (e.op === 'AND' || e.op === 'OR') {
       const word = e.op === 'AND' ? sql` and ` : sql` or `;
-      return { type: 'bool', sql: sql`(${this.cond(e.l)}${word}${this.cond(e.r)})` };
+      return { type: 'bool', sql: sql`(${this.cond(e.l)}${word}${this.cond(e.r)})`, leaf: false };
     }
-    if (isCmpOp(e.op)) return { type: 'bool', sql: this.compare(e.op, this.val(e.l), this.val(e.r)) };
+    if (isCmpOp(e.op)) return { type: 'bool', sql: this.compare(e.op, this.val(e.l), this.val(e.r)), leaf: false };
     return unsupported(`Оператор ${e.op}`, e);
   }
 
@@ -171,8 +184,26 @@ class FilterCompiler {
    * lists compare as ordered sequences. Text and dates compare by code point (collation "C"),
    * datetimes by instant.
    */
-  private compare(op: CmpOp, l: Val, r: Val): Sql {
-    if (l.type === 'null' || r.type === 'null') return sql`false`;
+  private compare(op: CmpOp, left: Val, right: Val): Sql {
+    if (left.type === 'null' || right.type === 'null') return sql`false`;
+    return this.bind([left, right], ([l, r]) => this.compareBound(op, l!, r!));
+  }
+
+  /**
+   * Evaluates non-leaf operands once, in `(select <build> from (select <operand> as c0, ... offset 0) b)`, and
+   * hands `build` column references instead. Without it an operand's SQL would be repeated by
+   * every use, so nesting comparisons would grow the statement exponentially.
+   */
+  private bind(vals: Val[], build: (bound: Val[]) => Sql): Sql {
+    const columns = vals.flatMap((v, i) => (v.leaf ? [] : [sql`${v.sql} as ${sql.raw(`c${i}`)}`]));
+    if (columns.length === 0) return build(vals);
+    const bound = vals.map((v, i): Val => (v.leaf ? v : { ...v, sql: sql.raw(`b.c${i}`), leaf: true }));
+    // `offset 0` keeps the planner from pulling the subselect up, which would inline the operand
+    // back into every reference (and make planning exponential again).
+    return sql`(select ${build(bound)} from (select ${sql.join(columns)} offset 0) b)`;
+  }
+
+  private compareBound(op: CmpOp, l: Val, r: Val): Sql {
     const o = CMP[op];
     const t = l.type;
     let inner: Sql;
@@ -197,7 +228,7 @@ class FilterCompiler {
   }
 
   private call(e: Expr & { k: 'call' }): Val {
-    const bool = (s: Sql): Val => ({ type: 'bool', sql: s });
+    const bool = (s: Sql): Val => ({ type: 'bool', sql: s, leaf: false });
     switch (e.fn) {
       case 'AND': case 'OR':
         return bool(sql`(${sql.join(e.args.map((a) => this.cond(a)), e.fn === 'AND' ? sql` and ` : sql` or `)})`);
@@ -211,27 +242,34 @@ class FilterCompiler {
         return bool(sql`exists (select 1 from record_sets rs where rs.record_id = records.id and rs.set_key = ${key.v}::text)`);
       }
       case 'IN': {
-        const [needle, ...candidates] = e.args.map((a) => this.val(a));
-        const any = candidates.map((c) => sql`coalesce(${this.compare('=', needle!, c)}, false)`);
-        return bool(sql`(${sql.join(any, sql` or `)})`);
+        const vals = e.args.map((a) => this.val(a));
+        if (vals[0]!.type === 'null') return bool(sql`false`);
+        return bool(this.bind(vals, ([needle, ...candidates]) => {
+          const any = candidates.map((c) => sql`coalesce(${this.compare('=', needle!, c)}, false)`);
+          return sql`(${sql.join(any, sql` or `)})`;
+        }));
       }
       case 'CONTAINS': return bool(this.contains(e));
       case 'DATE': {
         // typecheck has already validated the literal as YYYY-MM-DD
         const lit = e.args[0];
         if (lit?.k !== 'str') throw new QueryError('type', 'DATE принимает только строковый литерал', e);
-        return { type: 'date', sql: sql`${lit.v}::text` };
+        return { type: 'date', sql: sql`${lit.v}::text`, leaf: true };
       }
-      case 'TODAY': return { type: 'date', sql: sql`${todayIn(this.now, this.cfg.timezone)}::text` };
-      case 'NOW': return { type: 'datetime', sql: sql`${this.now.toISOString()}::text` };
+      case 'TODAY': return { type: 'date', sql: sql`${todayIn(this.now, this.cfg.timezone)}::text`, leaf: true };
+      case 'NOW': return { type: 'datetime', sql: sql`${this.now.toISOString()}::text`, leaf: true };
       default: return unsupported(`Функция ${e.fn}`, e);
     }
   }
 
   private contains(e: Expr & { k: 'call' }): Sql {
-    const hay = this.val(e.args[0]!);
-    const needle = this.val(e.args[1]!);
-    if (hay.type === 'null' || needle.type === 'null') return sql`false`;
+    const first = this.val(e.args[0]!);
+    const second = this.val(e.args[1]!);
+    if (first.type === 'null' || second.type === 'null') return sql`false`;
+    return this.bind([first, second], ([hay, needle]) => this.containsBound(e, hay!, needle!));
+  }
+
+  private containsBound(e: Expr, hay: Val, needle: Val): Sql {
     const nonEmpty = sql`not ${this.empty(hay)} and not ${this.empty(needle)}`;
 
     if (typeof hay.type === 'object') {
@@ -274,25 +312,52 @@ function typeEnv(cfg: CompiledConfig, onLink: (key: string) => void): TypeEnv {
   };
 }
 
-/** Parses, type-checks (must be bool) and compiles a filter to a boolean SQL condition. */
-function compileFilter(cfg: CompiledConfig, src: string, now: Date): Sql {
-  const ast = parseFilter(src);
-  let linkHit: string | undefined;
-  let type: ExprType;
+function depthOf(e: Expr): number {
+  switch (e.k) {
+    case 'neg': return 1 + depthOf(e.e);
+    case 'bin': return 1 + Math.max(depthOf(e.l), depthOf(e.r));
+    case 'call': return 1 + e.args.reduce((m, a) => Math.max(m, depthOf(a)), 0);
+    default: return 1;
+  }
+}
+
+/** Anything that is not already a QueryError (RangeError from deep recursion, bad timezone...) becomes a `type` one. */
+function asQueryError(err: unknown): QueryError {
+  if (err instanceof QueryError) return err;
+  if (err instanceof ExprSyntaxError) return new QueryError('syntax', err.message, err.pos);
+  if (err instanceof ExprTypeError) return new QueryError('type', err.message, err.pos);
+  return new QueryError('type', `Не удалось разобрать фильтр: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+/**
+ * Parses, type-checks (must be bool) and compiles a filter to a boolean SQL condition.
+ * Input longer than 2000 characters or deeper than 32 nodes is rejected as too complex.
+ * @throws QueryError, always: nothing else escapes.
+ */
+export function compileFilterCondition(cfg: CompiledConfig, src: string, now: Date): RawBuilder<unknown> {
   try {
-    type = typecheck(ast, typeEnv(cfg, (k) => { linkHit = k; }));
+    if (src.length > MAX_FILTER_LENGTH) throw new QueryError('type', TOO_COMPLEX);
+    const ast = parseFilter(src);
+    if (depthOf(ast) > MAX_FILTER_DEPTH) throw new QueryError('type', TOO_COMPLEX, ast);
+    let linkHit: string | undefined;
+    let type: ExprType;
+    try {
+      type = typecheck(ast, typeEnv(cfg, (k) => { linkHit = k; }));
+    } catch (err) {
+      if (!(err instanceof ExprTypeError)) throw err;
+      throw new QueryError(
+        'type',
+        linkHit === undefined ? err.message : `Поле-ссылку нельзя использовать в фильтре: {${linkHit}}`,
+        err.pos,
+      );
+    }
+    if (type !== 'bool') {
+      throw new QueryError('type', `Фильтр должен быть bool, получен ${typeof type === 'string' ? type : `list<${type.list}>`}`, ast);
+    }
+    return new FilterCompiler(cfg, now).cond(ast);
   } catch (err) {
-    if (!(err instanceof ExprTypeError)) throw err;
-    throw new QueryError(
-      'type',
-      linkHit === undefined ? err.message : `Поле-ссылку нельзя использовать в фильтре: {${linkHit}}`,
-      err.pos,
-    );
+    throw asQueryError(err);
   }
-  if (type !== 'bool') {
-    throw new QueryError('type', `Фильтр должен быть bool, получен ${typeof type === 'string' ? type : `list<${type.list}>`}`, ast);
-  }
-  return new FilterCompiler(cfg, now).cond(ast);
 }
 
 /** `ORDER BY` term for a scalar field; NULLs go last in both directions. */
@@ -307,8 +372,20 @@ function sortTerm(cfg: CompiledConfig, compiler: FilterCompiler, field: string, 
   const direction = dir === 'asc' ? sql`asc` : sql`desc`;
   if (field === 'title') return sql`records.title ${direction} nulls last`;
   const v = compiler.fieldVal(field, t);
-  const key = t === 'datetime' ? sql`${v.sql}::timestamptz` : v.sql;
-  return sql`${key} ${direction} nulls last`;
+  if (t === 'text' || t === 'date' || t === 'datetime') {
+    // Blank text counts as empty and sorts last like NULL (and is never cast to a timestamp).
+    const value = t === 'datetime' ? sql`${v.sql}::timestamptz` : v.sql;
+    return sql`(case when ${compiler.empty(v)} then null else ${value} end) ${direction} nulls last`;
+  }
+  return sql`${v.sql} ${direction} nulls last`;
+}
+
+function guarded<T>(f: () => T): T {
+  try {
+    return f();
+  } catch (err) {
+    throw asQueryError(err);
+  }
 }
 
 function pagingValue(name: string, v: number | undefined, fallback: number): number {
@@ -331,9 +408,11 @@ export async function queryRecords(
 ): Promise<QueryOutput> {
   const limit = Math.min(pagingValue('limit', q.limit, DEFAULT_LIMIT), MAX_LIMIT);
   const offset = pagingValue('offset', q.offset, 0);
-  const filter = q.filter !== undefined && q.filter.trim() !== '' ? compileFilter(cfg, q.filter, now) : undefined;
-  const compiler = new FilterCompiler(cfg, now);
-  const sorts = (q.sort ?? []).map((s) => sortTerm(cfg, compiler, s.field, s.dir));
+  const filter = q.filter !== undefined && q.filter.trim() !== '' ? compileFilterCondition(cfg, q.filter, now) : undefined;
+  const sorts = guarded(() => {
+    const compiler = new FilterCompiler(cfg, now);
+    return (q.sort ?? []).map((s) => sortTerm(cfg, compiler, s.field, s.dir));
+  });
 
   let base = db.selectFrom('records').where('workspace_id', '=', workspaceId);
   if (q.includeArchived !== true) base = base.where('archived_at', 'is', null);

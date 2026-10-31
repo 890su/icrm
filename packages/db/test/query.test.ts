@@ -1,6 +1,7 @@
 import { compileConfig, evaluate, parse, parseConfigFiles, type CompiledConfig, type EvalCtx, type Value } from '@icrm/core';
 import { sql, type Kysely } from 'kysely';
 import { beforeAll, describe, expect, test } from 'vitest';
+import { compileFilterCondition } from '../src/query.js';
 import {
   ensureWorkspace, queryRecords, RecordService, type DB, type QueryInput, type SaveResult,
 } from '../src/index.js';
@@ -147,6 +148,9 @@ const FILTERS = [
   // boolean structure
   'AND({done}, {a} > 1)', 'OR({done}, HAS_SET("montage"))', 'IS_EMPTY({notes}) AND NOT({done})',
   'NOT(HAS_SET("montage")) AND {hours} > 0', '({hours} > 1) = TRUE', 'IS_EMPTY({hours} > 1)',
+  // nested operands (evaluated once through a subselect)
+  '(({a} > 1) = TRUE) = TRUE', '(({a} > 1) = FALSE) <> ({done} = TRUE)', 'IN({a} > 1, TRUE, NULL)', 'IN(({a} > 1) = TRUE, ({done} = TRUE), FALSE)',
+  '(CONTAINS({notes}, "кам") = TRUE) = ({hours} > 1)', 'CONTAINS({title}, "кам") AND (({price} = {extra}) = TRUE)',
 ] as const;
 
 describe('SQL equals in-memory evaluate', () => {
@@ -328,5 +332,63 @@ describe('paging, archive and sorting', () => {
 
     const byMoney = await run({ sort: [{ field: 'price', dir: 'desc' }], limit: 500 });
     expect((byMoney.items[0]!.data.price as { amount: string }).amount).toBe('100');
+  });
+});
+
+describe('complexity limits, key literals and error wrapping', () => {
+  const nested = (depth: number): string => {
+    let f = '{a} > 1';
+    for (let i = 0; i < depth; i++) f = `(${f}) = TRUE`;
+    return f;
+  };
+  const sqlOf = (filter: string): string => compileFilterCondition(cfg, filter, NOW).compile(db).sql;
+
+  test('nested comparisons grow the SQL linearly: depth 20 stays small and still matches evaluate', async () => {
+    const f = nested(20);
+    expect(sqlOf(f).length).toBeLessThan(50_000);
+    expect(sqlOf(nested(20)).length).toBeLessThan(sqlOf(nested(10)).length * 3);
+    const nestedIn = `IN(${nested(18)}, TRUE, ${nested(18)})`;
+    expect(sqlOf(nestedIn).length).toBeLessThan(50_000);
+    for (const filter of [f, nestedIn]) {
+      const expected = (await storedRecords(ws)).filter((r) => evaluate(parse(filter), ctxOf(r)) === true).map((r) => r.id).sort();
+      expect((await idsOf({ filter, limit: 500 })).sort()).toEqual(expected);
+    }
+  });
+
+  test('too long or too deep filters are rejected', async () => {
+    await expect(run({ filter: `{done} OR ${'FALSE OR '.repeat(300)}TRUE` })).rejects.toMatchObject({ code: 'type', message: 'фильтр слишком сложный' });
+    const deep = (n: number) => `${'NOT('.repeat(n)}{done}${')'.repeat(n)}`;
+    await expect(run({ filter: deep(40) })).rejects.toMatchObject({ code: 'type', message: 'фильтр слишком сложный' });
+    await expect(run({ filter: deep(20) })).resolves.toBeDefined();
+  });
+
+  test('field keys are SQL literals (indexable), checked against KEY_RE', () => {
+    const c = compileFilterCondition(cfg, '{hours} > 1 AND {notes} = "x"', NOW).compile(db);
+    expect(c.sql).toContain("data->>'hours'");
+    expect(c.sql).toContain("data->>'notes'");
+    expect(c.parameters).not.toContain('hours');
+  });
+
+  test('nothing but QueryError escapes: a bad timezone becomes a type error', async () => {
+    const broken = { ...cfg, timezone: 'Nope/Zone' } as CompiledConfig;
+    await expect(queryRecords(db, broken, ws, { filter: '{due_date} < TODAY()' }, NOW)).rejects.toMatchObject({ name: 'QueryError', code: 'type' });
+  });
+
+  test('blank text sorts as empty: last, like null, in both directions', async () => {
+    for (const dir of ['asc', 'desc'] as const) {
+      const notes = (await run({ sort: [{ field: 'notes', dir }], limit: 500 })).items.map((i) => i.data.notes ?? null);
+      const blank = (v: Value) => v === null || (typeof v === 'string' && v.trim() === '');
+      const firstBlank = notes.findIndex(blank);
+      expect(firstBlank).toBeGreaterThan(0);
+      expect(notes.slice(firstBlank).every(blank)).toBe(true);
+      expect(notes.slice(firstBlank).length).toBeGreaterThanOrEqual(5);
+    }
+  });
+
+  test('sorting by datetime tolerates blank values', async () => {
+    const r = (await run({ sort: [{ field: 'seen_at', dir: 'asc' }], limit: 500 })).items.map((i) => i.data.seen_at ?? null);
+    const real = r.filter((v) => typeof v === 'string' && v.trim() !== '');
+    expect(r.slice(0, real.length)).toEqual(real);
+    expect(real).toEqual([...real].sort((x, y) => Date.parse(x as string) - Date.parse(y as string)));
   });
 });
