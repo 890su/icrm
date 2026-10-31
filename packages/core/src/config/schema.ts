@@ -27,6 +27,8 @@ export interface FieldDef {
   cardinality?: 'one' | 'many';
   inverse_label?: string;
   hierarchical?: boolean;
+  /** Link targets are rows owned by the source record (spec §1.12). */
+  owned?: boolean;
   expr?: string;
   via?: string;
   direction?: 'forward' | 'inverse';
@@ -97,6 +99,7 @@ const field = z.discriminatedUnion('type', [
     cardinality: z.enum(['one', 'many']).default('many'),
     inverse_label: str.optional(),
     hierarchical: z.boolean().optional(),
+    owned: z.boolean().optional(),
   }),
   z.strictObject({ type: z.literal('formula'), ...common, expr: str }),
   z.strictObject({

@@ -148,6 +148,12 @@ export function compileConfig(raw: RawConfig): CompiledConfig {
     if (d.type !== 'link') continue;
     for (const t of d.target_sets ?? []) {
       if (!setDefs.has(t)) report(d.src, 'target_sets', `набор "${t}" не найден`);
+      else if (d.owned === true && setDefs.get(t)!.system) {
+        report(d.src, 'target_sets', `строки не могут иметь системный набор "${t}"`);
+      }
+    }
+    if (d.owned === true && d.hierarchical === true) {
+      report(d.src, 'owned', 'владеемая связь не может быть иерархической');
     }
   }
 
@@ -443,4 +449,13 @@ export function compileConfig(raw: RawConfig): CompiledConfig {
   }));
 
   return { timezone: raw.timezone, fields, sets, rules, formulaOrder, rollups, setsOfField, showTargets };
+}
+
+/** Owned link fields (keys) that belong to any of `sets`, de-duplicated and sorted by key. */
+export function ownedFieldsOf(cfg: CompiledConfig, sets: Iterable<string>): string[] {
+  const keys = new Set<string>();
+  for (const k of sets) {
+    for (const f of cfg.sets.get(k)?.fields ?? []) if (cfg.fields.get(f)?.owned === true) keys.add(f);
+  }
+  return [...keys].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }

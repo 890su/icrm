@@ -46,6 +46,16 @@ describe('parseConfigFiles', () => {
     expect(raw.fields[2]).toMatchObject({ agg: 'count' });
   });
 
+  test('owned is rejected on non-link fields', () => {
+    expect(issuesOf([file('a.yaml', 'fields:\n  note: {type: text, label: N, owned: true}')]))
+      .toContainEqual(expect.objectContaining({ path: 'fields.note.owned' }));
+  });
+
+  test('owned is accepted on link fields', () => {
+    const raw = parseConfigFiles([file('a.yaml', 'fields:\n  rows: {type: link, label: R, target_sets: [row], owned: true}')]);
+    expect(raw.fields[0]).toMatchObject({ owned: true });
+  });
+
   test('parses workspace timezone and rules', () => {
     const raw = parseConfigFiles([
       file('a.yaml', [

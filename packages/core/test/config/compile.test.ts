@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { ConfigError } from '../../src/index.js';
+import { ConfigError, ownedFieldsOf } from '../../src/index.js';
 import { compile, compileIssues, fixture } from '../helpers.js';
 
 const costYaml = (expr: string, label: string) =>
@@ -231,5 +231,40 @@ describe('was (renames)', () => {
   a: {type: number, label: A, was: old}
   b: {type: number, label: B, was: old}`);
     expect(issues).toEqual([expect.objectContaining({ path: 'fields.b.was', line: 3, message: expect.stringContaining('fields.a') })]);
+  });
+  describe('owned link fields', () => {
+    test('owned link compiles and is listed per set', () => {
+      const cfg = compile(`fields: {expenses: {type: link, label: Расходы, target_sets: [expense], owned: true}, amount: {type: number, label: Сумма}}
+sets: {task: {label: Задача, fields: [expenses]}, expense: {label: Расход, fields: [amount]}}`);
+      expect(cfg.fields.get('expenses')!.owned).toBe(true);
+      expect(ownedFieldsOf(cfg, ['task'])).toEqual(['expenses']);
+      expect(ownedFieldsOf(cfg, ['expense'])).toEqual([]);
+    });
+
+    test('ownedFieldsOf de-duplicates and sorts by key', () => {
+      const cfg = compile(`fields: {b_rows: {type: link, label: B, target_sets: [row], owned: true}, a_rows: {type: link, label: A, target_sets: [row], owned: true}, plain: {type: link, label: P, target_sets: [row]}}
+sets: {s1: {label: S1, fields: [b_rows, a_rows, plain]}, s2: {label: S2, fields: [b_rows]}, row: {label: R, fields: []}}`);
+      expect(ownedFieldsOf(cfg, ['s1', 's2'])).toEqual(['a_rows', 'b_rows']);
+      expect(ownedFieldsOf(cfg, [])).toEqual([]);
+    });
+
+    test('owned + hierarchical is a config error', () => {
+      expect(compileIssues(`fields: {sub: {type: link, label: S, target_sets: [t], owned: true, hierarchical: true}}
+sets: {t: {label: T, fields: [sub]}}`)).toContainEqual(expect.objectContaining({
+        path: 'fields.sub.owned', message: 'владеемая связь не может быть иерархической',
+      }));
+    });
+
+    test('owned rows cannot carry a system set', () => {
+      expect(compileIssues(`fields: {rows: {type: link, label: R, target_sets: [conv], owned: true}}
+sets: {t: {label: T, fields: [rows]}, conv: {label: C, system: true, fields: []}}`)).toContainEqual(expect.objectContaining({
+        path: 'fields.rows.target_sets', message: 'строки не могут иметь системный набор "conv"',
+      }));
+    });
+
+    test('a non-owned link may target a system set', () => {
+      expect(() => compile(`fields: {r: {type: link, label: R, target_sets: [conv]}}
+sets: {t: {label: T, fields: [r]}, conv: {label: C, system: true, fields: []}}`)).not.toThrow();
+    });
   });
 });

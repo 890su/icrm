@@ -13,7 +13,7 @@ export type {
 } from './config/schema.js';
 export { parseConfigFiles } from './config/parse.js';
 export { KEY_RE } from './config/schema.js';
-export { compileConfig } from './config/compile.js';
+export { compileConfig, ownedFieldsOf } from './config/compile.js';
 export type {
   CompiledConfig, CompiledField, CompiledRollup, CompiledRule, CompiledSet,
 } from './config/compile.js';

@@ -19,13 +19,15 @@ export interface FieldState {
 
 export type ErrorCode = 'invalid_value' | 'invalid_option' | 'required' | 'validation' | 'readonly' | 'oscillation'
   | 'set_activation' | 'set_required_by' | 'unknown_set' | 'unknown_field' | 'link_target' | 'link_cardinality' | 'link_cycle'
-  | 'version_conflict' | 'not_found' | 'archived';
+  | 'link_owned' | 'version_conflict' | 'not_found' | 'archived';
 
 export interface RecordError {
   field?: string;
   rule_id?: string;
   code: ErrorCode;
   message: string;
+  /** Set when the error comes from a row of an owned link field (0-based index in that field). */
+  row?: { field: string; index: number };
 }
 
 export interface EvalResult {
