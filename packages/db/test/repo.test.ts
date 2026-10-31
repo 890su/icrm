@@ -53,6 +53,22 @@ describe('records repo', () => {
     expect(got!.updatedAt).toBeInstanceOf(Date);
   });
 
+  test('insertRecord stores owner, loadRecords returns it, writeRecord keeps it', async () => {
+    const { db, workspaceId, mk } = await setup();
+    const owner = await mk('owner');
+    const row = uuidv7();
+    await insertRecord(db, {
+      id: row, workspaceId, title: '', data: {}, sets: new Map(), createdBy: null,
+      owner: { id: owner, field: 'expenses' },
+    });
+    const loaded = await loadRecords(db, [row, owner]);
+    expect(loaded.get(row)).toMatchObject({ ownerId: owner, ownerField: 'expenses' });
+    expect(loaded.get(owner)).toMatchObject({ ownerId: null, ownerField: null });
+
+    expect(await writeRecord(db, { ...loaded.get(row)!, title: 'changed' }, 1)).toBe(true);
+    expect((await loadRecords(db, [row])).get(row)).toMatchObject({ title: 'changed', ownerId: owner, ownerField: 'expenses' });
+  });
+
   test('record without sets loads with empty sets map', async () => {
     const { db, mk } = await setup();
     const id = await mk();

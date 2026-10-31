@@ -12,6 +12,9 @@ export interface StoredRecord {
   createdAt: Date;
   updatedAt: Date;
   archivedAt: Date | null;
+  /** Owning record when this record is a row; set only at insert. */
+  ownerId: string | null;
+  ownerField: string | null;
 }
 
 /**
@@ -44,6 +47,8 @@ export async function loadRecords(
       createdAt: r.created_at,
       updatedAt: r.updated_at,
       archivedAt: r.archived_at,
+      ownerId: r.owner_id,
+      ownerField: r.owner_field,
     });
   }
 
@@ -67,6 +72,8 @@ export async function insertRecord(
     createdBy: string | null;
     /** Defaults to 1. A save that inserts first and writes the evaluated state later inserts 0. */
     version?: number;
+    /** Makes the record a row owned by record `id` through its field `field`. */
+    owner?: { id: string; field: string };
   },
 ): Promise<void> {
   await tx
@@ -78,6 +85,8 @@ export async function insertRecord(
       data: JSON.stringify(r.data),
       created_by: r.createdBy,
       version: r.version,
+      owner_id: r.owner?.id ?? null,
+      owner_field: r.owner?.field ?? null,
     })
     .execute();
   await writeSets(tx, r.id, new Map(), r.sets);

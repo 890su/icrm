@@ -13,6 +13,13 @@ describe('db schema', () => {
       ['workspaces', 'users', 'records', 'record_sets', 'links', 'change_log', 'files', 'config_state']));
   });
 
+  test('migration 002 adds owner columns and the pair check', async () => {
+    const { db, workspaceId } = await freshDb();
+    await expect(
+      sql`insert into records (id, workspace_id, title, owner_field) values (${uuidv7()}, ${workspaceId}, 'x', 'expenses')`.execute(db),
+    ).rejects.toThrow(/records_owner_pair/);
+  });
+
   test('ensureWorkspace is idempotent and seeds system@local', async () => {
     const { db } = await freshDb();
     const a = await ensureWorkspace(db, 'default');

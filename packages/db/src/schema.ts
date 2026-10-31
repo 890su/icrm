@@ -36,6 +36,9 @@ export interface RecordsTable {
   created_at: Generated<Date>;
   updated_at: Generated<Date>;
   archived_at: NullableTimestamp;
+  /** Set when this record is a row owned by another record; both or neither with owner_field. */
+  owner_id: string | null;
+  owner_field: string | null;
 }
 
 export interface RecordSetsTable {
