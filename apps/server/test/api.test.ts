@@ -81,7 +81,7 @@ describe('meta', () => {
     expect(JSON.stringify(r.json())).not.toContain('"src"');
 
     const meta = r.json();
-    expect(meta.sets.map((s: { key: string }) => s.key)).toEqual(['task', 'montage']);
+    expect(meta.sets.map((s: { key: string }) => s.key)).toEqual(['task', 'expense', 'montage']);
     expect(meta.sets.find((s: { key: string }) => s.key === 'montage')).toMatchObject({
       requires: ['task'], closure: ['montage', 'task'].sort(),
     });
@@ -170,12 +170,12 @@ describe('records', () => {
 
     const linked = await put(`/records/${a.id}/links/related`, { targetIds: [b.id] });
     expect(linked.statusCode, linked.body).toBe(200);
-    expect(linked.json().links).toEqual({ related: [b.id] });
-    expect((await get(`/records/${a.id}`)).json().links).toEqual({ related: [b.id] });
+    expect(linked.json().links.related).toEqual([b.id]);
+    expect((await get(`/records/${a.id}`)).json().links.related).toEqual([b.id]);
 
     // links given at create time
     const c = await create({ title: 'Третья', sets: ['task'], data: { notes: 'gamma' }, links: { related: [a.id] } });
-    expect((await get(`/records/${c.id}`)).json().links).toEqual({ related: [a.id] });
+    expect((await get(`/records/${c.id}`)).json().links.related).toEqual([a.id]);
 
     // other tests share the database, so the queries are scoped to this test's records
     const mine = 'HAS_SET("task") AND ({notes} = "alpha" OR {notes} = "beta" OR {notes} = "gamma")';
@@ -204,7 +204,7 @@ describe('records', () => {
 
     // clearing links
     const cleared = await put(`/records/${a.id}/links/related`, { targetIds: [] });
-    expect(cleared.json().links).toEqual({ related: [] });
+    expect(cleared.json().links.related).toEqual([]);
   });
 
   test('link errors → 422', async () => {
@@ -215,6 +215,181 @@ describe('records', () => {
     const notLink = await put(`/records/${a.id}/links/notes`, { targetIds: [] });
     expect(notLink.statusCode).toBe(422);
     expect(notLink.json().errors[0].code).toBe('unknown_field');
+  });
+});
+
+describe('rows', () => {
+  const GHOST = '0198a000-0000-7000-8000-000000000000';
+  type RowRef = { id: string; version: number };
+  const task = async (extra: object = {}): Promise<{ id: string; version: number; rows: { expenses: RowRef[] } }> => {
+    const r = await post('/records', { title: 'Задача с расходами', sets: ['task'], ...extra });
+    expect(r.statusCode, r.body).toBe(201);
+    return r.json();
+  };
+
+  test('meta exposes owned on the owned field only', async () => {
+    const fields = (await get('/meta')).json().fields as { key: string; owned?: boolean }[];
+    expect(fields.find((f) => f.key === 'expenses')).toMatchObject({ type: 'link', owned: true, target_sets: ['expense'] });
+    expect(fields.find((f) => f.key === 'related')?.owned).not.toBe(true);
+  });
+
+  test('rows end-to-end: create with rows, patch rows, query', async () => {
+    const c = await post('/records', {
+      title: 'T-rows', sets: ['task'], rows: { expenses: [{ data: { amount: 4 }, sets: ['expense'] }] },
+    });
+    expect(c.statusCode, c.body).toBe(201);
+    expect(c.json().rows.expenses).toHaveLength(1);
+    expect(c.json().rows.expenses[0]).toMatchObject({ data: { amount: 4 }, sets: [{ key: 'expense' }] });
+    const rowId = c.json().rows.expenses[0].id;
+
+    // GET shows the same rows
+    expect((await get(`/records/${c.json().id}`)).json().rows.expenses.map((r: RowRef) => r.id)).toEqual([rowId]);
+
+    // change one row and add another in one batch
+    const ch = await patch(`/records/${c.json().id}`, {
+      version: c.json().version,
+      rows: { expenses: [
+        { id: rowId, version: c.json().rows.expenses[0].version, data: { amount: 5 } },
+        { data: { amount: 7 }, sets: ['expense'] },
+      ] },
+    });
+    expect(ch.statusCode, ch.body).toBe(200);
+    expect(ch.json().rows.expenses.map((r: { data: { amount: number } }) => r.data.amount)).toEqual([5, 7]);
+
+    // delete the first
+    const p = await patch(`/records/${c.json().id}`, {
+      version: ch.json().version, rows: { expenses: [{ id: rowId, delete: true }] },
+    });
+    expect(p.statusCode, p.body).toBe(200);
+    expect(p.json().rows.expenses.map((r: { data: { amount: number } }) => r.data.amount)).toEqual([7]);
+
+    // rows stay out of general queries unless asked for
+    const plain = await post('/query', { filter: 'HAS_SET("expense")' });
+    expect(plain.statusCode).toBe(200);
+    expect(plain.json().total).toBe(0);
+    const withRows = await post('/query', { filter: 'HAS_SET("expense")', includeRows: true });
+    expect(withRows.json().total).toBeGreaterThan(0);
+
+    // an owner patched without rows keeps them
+    const keep = await patch(`/records/${c.json().id}`, { version: p.json().version, title: 'T-rows 2' });
+    expect(keep.json().rows.expenses).toHaveLength(1);
+  });
+
+  test('rows key: present (possibly empty) when an owned field is enabled, omitted otherwise', async () => {
+    const bare = await create({ title: 'bare' });
+    expect((await get(`/records/${bare.id}`)).json()).not.toHaveProperty('rows');
+    const t = await task();
+    expect((await get(`/records/${t.id}`)).json().rows).toEqual({ expenses: [] });
+  });
+
+  test('row error → 422 with row pointer; the whole batch rolls back', async () => {
+    const t = await task();
+    const bad = await patch(`/records/${t.id}`, {
+      version: t.version,
+      title: 'must not stick',
+      rows: { expenses: [{ data: { amount: 1 }, sets: ['expense'] }, { data: { amount: 'lots' }, sets: ['expense'] }] },
+    });
+    expect(bad.statusCode, bad.body).toBe(422);
+    expect(bad.json().errors).toEqual([
+      expect.objectContaining({ code: 'invalid_value', field: 'amount', row: { field: 'expenses', index: 1 } }),
+    ]);
+    const after = (await get(`/records/${t.id}`)).json();
+    expect(after).toMatchObject({ title: 'Задача с расходами', version: t.version });
+    expect(after.rows.expenses).toEqual([]);
+
+    const create422 = await post('/records', { title: 'x', sets: ['task'], rows: { notes: [{}] } });
+    expect(create422.statusCode).toBe(422);
+    expect(create422.json().errors[0].code).toBe('unknown_field');
+  });
+
+  test('row version_conflict → 409; delete of a foreign or unknown row → 422 link_owned', async () => {
+    const t = await task({ rows: { expenses: [{ data: { amount: 1 }, sets: ['expense'] }] } });
+    const row = t.rows.expenses[0]!;
+    const stale = await patch(`/records/${t.id}`, {
+      version: t.version, rows: { expenses: [{ id: row.id, version: row.version + 5, data: { amount: 2 } }] },
+    });
+    expect(stale.statusCode, stale.body).toBe(409);
+    expect(stale.json().errors).toEqual([
+      expect.objectContaining({ code: 'version_conflict', row: { field: 'expenses', index: 0 } }),
+    ]);
+
+    const other = await task();
+    const foreign = await patch(`/records/${other.id}`, {
+      version: other.version, rows: { expenses: [{ id: row.id, delete: true }] },
+    });
+    expect(foreign.statusCode, foreign.body).toBe(422);
+    expect(foreign.json().errors[0]).toMatchObject({ code: 'link_owned', row: { field: 'expenses', index: 0 } });
+    const ghost = await patch(`/records/${other.id}`, {
+      version: other.version, rows: { expenses: [{ id: GHOST, delete: true }] },
+    });
+    expect(ghost.statusCode).toBe(422);
+    expect(ghost.json().errors[0].code).toBe('link_owned');
+  });
+
+  test('mixed errors: any version_conflict makes the batch 409, and all errors are listed', async () => {
+    const t = await task({ rows: { expenses: [{ data: { amount: 1 }, sets: ['expense'] }] } });
+    const row = t.rows.expenses[0]!;
+    const r = await patch(`/records/${t.id}`, {
+      version: t.version,
+      rows: { expenses: [
+        { data: { amount: 'lots' }, sets: ['expense'] }, // a validation error
+        { id: row.id, version: row.version + 5, data: { amount: 2 } }, // a conflict
+      ] },
+    });
+    expect(r.statusCode, r.body).toBe(409);
+    expect(r.json().errors.map((e: { code: string; row: { index: number } }) => [e.code, e.row.index]).sort())
+      .toEqual([['invalid_value', 0], ['version_conflict', 1]]);
+  });
+
+  test('malformed row ops → 400, never reaching the database', async () => {
+    const t = await task();
+    const rowsBodies: unknown[] = [
+      { expenses: [{ id: 'x', delete: true }] }, // id is not a uuid
+      { expenses: [{ id: 'x', version: 1 }] },
+      { expenses: [{ id: GHOST, delete: false }] },
+      { expenses: [{ id: GHOST, delete: 1 }] },
+      { expenses: [{ id: GHOST, delete: true, version: 1 }] }, // delete allows only id
+      { expenses: [{ id: GHOST, delete: true, data: {} }] },
+      { expenses: [{ id: GHOST, data: { amount: 1 } }] }, // change without version
+      { expenses: [{ id: GHOST, version: -1 }] },
+      { expenses: [{ id: GHOST, version: 1.5 }] },
+      { expenses: [{ id: GHOST, version: 'one' }] },
+      { expenses: [{ data: { amount: 1 }, bogus: 1 }] }, // unknown key
+      { expenses: [{ data: 'x' }] },
+      { expenses: [{ sets: 'expense' }] },
+      { expenses: [{ version: 1, data: {} }] }, // version without id
+      { expenses: [{ enableSets: ['expense'] }] }, // change-only key on a new row
+      { expenses: [{ id: GHOST, version: 1, sets: ['expense'] }] }, // new-row-only key on a change
+      { expenses: {} }, // op list not an array
+      { expenses: 'x' },
+      { expenses: [null] },
+      { expenses: [[]] },
+    ];
+    for (const rows of [...rowsBodies, 'x', [], [{ data: {} }], null, 5]) {
+      const body = JSON.stringify(rows);
+      const c = await post('/records', { title: 'x', sets: ['task'], rows });
+      expect(c.statusCode, `create ${body}: ${c.body}`).toBe(400);
+      expect(c.json().errors[0].code).toBe('bad_request');
+      const p = await patch(`/records/${t.id}`, { version: t.version, rows });
+      expect(p.statusCode, `patch ${body}: ${p.body}`).toBe(400);
+      expect(p.json().errors[0].code).toBe('bad_request');
+    }
+    // includeRows must be a boolean
+    expect((await post('/query', { includeRows: 'yes' })).statusCode).toBe(400);
+    expect((await post('/query', { includeRows: 1 })).statusCode).toBe(400);
+    // nothing leaked in
+    expect((await get(`/records/${t.id}`)).json().version).toBe(t.version);
+  });
+
+  test('valid op shapes are accepted: empty rows, empty row list, a new row with only its set', async () => {
+    const t = await task();
+    const ok = await patch(`/records/${t.id}`, { version: t.version, rows: { expenses: [] } });
+    expect(ok.statusCode, ok.body).toBe(200);
+    const empty = await patch(`/records/${t.id}`, { version: ok.json().version, rows: {} });
+    expect(empty.statusCode, empty.body).toBe(200);
+    const n = await patch(`/records/${t.id}`, { version: empty.json().version, rows: { expenses: [{ sets: ['expense'] }] } });
+    expect(n.statusCode, n.body).toBe(200);
+    expect(n.json().rows.expenses).toHaveLength(1);
   });
 });
 

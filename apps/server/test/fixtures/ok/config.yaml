@@ -5,8 +5,11 @@ fields:
   done: {type: bool, label: Выполнена}
   act_file: {type: file, label: Акт}
   related: {type: link, label: Связанные задачи, target_sets: [task]}
+  expenses: {type: link, label: Расходы, target_sets: [expense], cardinality: many, owned: true, inverse_label: Задача}
+  amount: {type: number, label: Сумма}
 sets:
-  task: {label: Задача, fields: [title, notes, done, related]}
+  task: {label: Задача, fields: [title, notes, done, related, expenses]}
+  expense: {label: Расход, fields: [amount]}
   montage:
     label: Монтаж
     requires: [task]

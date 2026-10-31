@@ -11,6 +11,7 @@ const queryBody = z.strictObject({
   limit: z.number().optional(),
   offset: z.number().optional(),
   includeArchived: z.boolean().optional(),
+  includeRows: z.boolean().optional(),
 });
 
 export function registerQueryRoutes(

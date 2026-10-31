@@ -18,8 +18,22 @@ const ids = z.array(z.guid());
 const idParams = z.strictObject({ id: z.guid() });
 const linkParams = z.strictObject({ id: z.guid(), field: z.string() });
 
+// A row op is one of three strict, mutually exclusive shapes (spec §1.12); anything else is a 400.
+const newRow = z.strictObject({ title: z.string().optional(), data: data.optional(), sets: keys.optional() });
+const changeRow = z.strictObject({
+  id: z.guid(),
+  version: z.number().int().min(0),
+  title: z.string().optional(),
+  data: data.optional(),
+  enableSets: keys.optional(),
+  disableSets: keys.optional(),
+});
+const deleteRow = z.strictObject({ id: z.guid(), delete: z.literal(true) });
+const rows = z.record(z.string(), z.array(z.union([newRow, changeRow, deleteRow])));
+
 const createBody = z.strictObject({
   title: z.string(), data: data.optional(), sets: keys.optional(), links: z.record(z.string(), ids).optional(),
+  rows: rows.optional(),
 });
 const patchBody = z.strictObject({
   version: z.number().int().min(0),
@@ -27,6 +41,7 @@ const patchBody = z.strictObject({
   data: data.optional(),
   enableSets: keys.optional(),
   disableSets: keys.optional(),
+  rows: rows.optional(),
 });
 const linksBody = z.strictObject({ targetIds: ids });
 
