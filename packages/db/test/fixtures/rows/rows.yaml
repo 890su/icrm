@@ -36,8 +36,9 @@ fields:
     owned: true
     inverse_label: Бюджет
   memo: {type: text, label: Памятка}
+  task_note: {type: text, label: Обоснование расходов}
 sets:
-  task: {label: Задача, fields: [title, rate, expenses, primary_expense, expenses_total, transport_total]}
+  task: {label: Задача, fields: [title, rate, expenses, primary_expense, expenses_total, transport_total, task_note]}
   expense: {label: Расход, fields: [expense_kind, amount, note, task_rate, cost]}
   expense_transport:
     label: Транспортный расход
@@ -53,3 +54,11 @@ rules:
   - id: expense_amount_required
     when: 'HAS_SET("expense")'
     require: [amount]
+  # A row rule over a value substituted from the owner: new rows must see the owner while evaluated.
+  - id: big_expense_cost_known
+    when: 'HAS_SET("expense") AND {amount} >= 1000'
+    require: [cost]
+  # An owner rule over a total of its rows: fails only after the rows are written.
+  - id: big_total_needs_note
+    when: '{expenses_total} > 5000'
+    require: [task_note]

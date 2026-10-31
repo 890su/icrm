@@ -4,7 +4,7 @@ import { loadRecords, type StoredRecord } from '../repo/records.js';
 import type { Db } from '../repo/types.js';
 import type { CascadeSeed } from './cascade.js';
 import { archived, recordError, SaveFailed, versionConflict } from './errors.js';
-import type { CreateInput, UpdateInput } from './record-service.js';
+import type { CreateInput, Inserted, UpdateInput } from './record-service.js';
 
 /** A new row: inserted owned by the record being saved, appended to the owned link. */
 export interface NewRowOp {
@@ -35,13 +35,16 @@ type LinkChange = CascadeSeed['changedLinks'][number];
 
 /**
  * The save steps of `RecordService` the batch runs its rows through: inside the caller's transaction,
- * without a cascade, with exactly the validation of a normal create/update.
+ * without a cascade, with exactly the validation of a normal create/update. `sets` are the evaluated sets.
  */
 export interface RowSteps {
   cfg: CompiledConfig;
   workspaceId: string;
-  createIn(tx: Db, i: CreateInput, owner: { id: string; field: string }): Promise<{ id: string; seed: CascadeSeed; sets: Map<string, string> }>;
-  updateIn(tx: Db, i: UpdateInput, stored: StoredRecord): Promise<{ seed: CascadeSeed }>;
+  /** Validates and inserts a new row (version 0) owned by `owner`; not evaluated yet. */
+  insertIn(tx: Db, i: CreateInput, owner: { id: string; field: string }): Promise<Inserted>;
+  /** Evaluates and writes a row `insertIn` inserted. */
+  finishCreateIn(tx: Db, userId: string, inserted: Inserted): Promise<{ seed: CascadeSeed; sets: Map<string, string> }>;
+  updateIn(tx: Db, i: UpdateInput, stored: StoredRecord): Promise<{ seed: CascadeSeed; sets: Map<string, string> }>;
   /** Replaces the targets of the owner's link field and logs a `link` entry; null when unchanged. */
   replaceLinksLogged(tx: Db, id: string, userId: string, field: string, targetIds: string[]): Promise<LinkChange | null>;
 }
@@ -60,7 +63,8 @@ export interface RowsResult {
   changedLinks: LinkChange[];
 }
 
-export const NO_ROWS: RowsResult = { seeds: [], changedLinks: [] };
+/** The result of a save without `rows`; a fresh object each time, as the owner's seed takes its arrays over. */
+export const noRows = (): RowsResult => ({ seeds: [], changedLinks: [] });
 
 const isDelete = (op: RowOp): op is DeleteRowOp => 'delete' in op && op.delete === true;
 const isChange = (op: RowOp): op is ChangeRowOp => 'id' in op && !isDelete(op);
@@ -71,21 +75,31 @@ function deleteRow(): never {
 
 /**
  * Saves the rows of an owner (spec §1.12) inside the owner's save, before the owner is evaluated, so that
- * the owner's rollups see the rows' new values. The caller has locked the owner; then:
+ * the owner's rollups see the rows' new values. The caller has locked the owner (or inserted it at
+ * version 0); then:
  *
  * 1. Every field of `rows` must be an owned link of the owner's `sets` (`unknown_field`, with `field`).
  *    This is structural: the batch stops here, later checks would be meaningless.
- * 2. Every existing row the batch names is locked in one `loadRecords(..., {forUpdate: true})` (id order).
+ * 2. Every existing row of this workspace the batch names is locked in one
+ *    `loadRecords(..., {forUpdate: true, workspaceId})` (id order); records of other workspaces are never
+ *    locked (they are `link_owned` below). A row named twice is a `validation` error of the later op.
  * 3. Per field, in batch order: `cardinality: one` with more than one row afterwards is `link_cardinality`
- *    (with `field`); each op is applied — a change through `updateIn` after the checks owned by this owner
- *    and field (`link_owned`), not archived (`archived`), at its version (`version_conflict`); a new row
- *    through `createIn` with the owner, then it must have one of the field's `target_sets` (`link_target`).
- *    Every error of op `index` of `field` gets `row: {field, index}`; a bad op does not stop the others, so
- *    all bad rows are reported. A row named twice in the batch is a `validation` error of the later op.
- * 4. Any error rolls back everything (`SaveFailed`). Otherwise each owned link becomes the stored targets
- *    (changed rows keep their places) followed by the new rows in batch order, logged at the owner.
+ *    (with `field`). A change op must name a row of this owner and field (`link_owned`, with `field`), not
+ *    archived (`archived`), at its version (`version_conflict`), and goes through `updateIn`. A new op is
+ *    validated and inserted (`insertIn`, owned by the owner) but not evaluated yet.
+ * 4. Each owned link becomes the stored targets (changed rows keep their places) followed by the inserted
+ *    new rows in batch order, logged at the owner.
+ * 5. The new rows are evaluated and written (`finishCreateIn`). They are linked by now, so their rollups
+ *    over the owner (`agg: first` substitutions) see the owner's STORED values. Accepted limitation: a row
+ *    rule depending on an owner value that this same save changes is checked against the owner's previous
+ *    value (the cascade afterwards still stores the row values computed from the new owner value).
+ * 6. Every changed and new row must end up with one of the field's `target_sets` (`link_target`, with
+ *    `field`).
  *
- * Nothing cascades here: the caller cascades once over the returned seeds and its own.
+ * Every error of op `index` of `field` gets `row: {field, index}` (its own `field`/`rule_id` kept); a bad
+ * op does not stop the others, so all bad rows are reported, in batch order (a field's own errors first).
+ * Any error rolls everything back (`SaveFailed`). Nothing cascades here: the caller cascades once over the
+ * returned seeds and its own.
  */
 export async function saveRows(
   steps: RowSteps, tx: Db, owner: RowOwner, rows: Record<string, RowOp[]>,
@@ -97,25 +111,46 @@ export async function saveRows(
     recordError('unknown_field', `Поле "${field}" не является владеемой связью включённых наборов записи`, { field }));
   if (unknown.length > 0) throw new SaveFailed(unknown);
 
-  const errors: RecordError[] = [];
-  const atRow = (field: string, index: number) => (e: RecordError): RecordError => ({ ...e, row: { field, index } });
+  // Errors of the fields themselves, and of each op by `field index`; assembled in batch order at the end.
+  const fieldErrors = new Map<string, RecordError[]>();
+  const opErrors = new Map<string, RecordError[]>();
+  const opKey = (field: string, index: number): string => `${field} ${index}`;
+  const fail = (field: string, index: number, errors: RecordError[]): void => {
+    const key = opKey(field, index);
+    opErrors.set(key, [...opErrors.get(key) ?? [], ...errors.map((e) => ({ ...e, row: { field, index } }))]);
+  };
+  /** Runs one step of op `index`; a `SaveFailed` becomes that op's errors and the result is null. */
+  const attempt = async <T>(field: string, index: number, step: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await step();
+    } catch (e) {
+      if (!(e instanceof SaveFailed)) throw e;
+      fail(field, index, e.errors);
+      return null;
+    }
+  };
+  const requireTargetSet = (field: string, sets: Map<string, string>): void => {
+    const def = cfg.fields.get(field)!;
+    const wanted = def.target_sets ?? [];
+    if (wanted.some((s) => sets.has(s))) return;
+    const names = wanted.map((s) => `«${cfg.sets.get(s)?.label ?? s}»`).join(', ');
+    throw new SaveFailed([recordError('link_target', `Поле «${def.label}»: у строки нет набора ${names}`, { field })]);
+  };
 
   const named = new Set<string>();
-  /** `field index` of ops naming a row an earlier op named. */
-  const repeated = new Set<string>();
   for (const field of fields) {
     for (const [index, op] of rows[field]!.entries()) {
       if (!('id' in op)) continue;
       if (named.has(op.id)) {
-        repeated.add(`${field} ${index}`);
-        errors.push(atRow(field, index)(recordError('validation', `Строка ${op.id} указана в пакете больше одного раза`)));
+        fail(field, index, [recordError('validation', `Строка ${op.id} указана в пакете больше одного раза`)]);
       }
       named.add(op.id);
     }
   }
-  const locked = await loadRecords(tx, [...named], { forUpdate: true });
+  const locked = await loadRecords(tx, [...named], { forUpdate: true, workspaceId: steps.workspaceId });
 
   const seeds: CascadeSeed[] = [];
+  const inserted: { field: string; index: number; row: Inserted }[] = [];
   const targets = new Map<string, string[]>();
   for (const field of fields) {
     const def = cfg.fields.get(field)!;
@@ -123,54 +158,61 @@ export async function saveRows(
     const before = await linksFrom(tx, owner.id, field);
     const added = ops.filter((op) => !('id' in op)).length;
     if (def.cardinality === 'one' && before.length + added > 1) {
-      errors.push(recordError('link_cardinality', `Поле «${def.label}» допускает только одну связь`, { field }));
+      fieldErrors.set(field, [recordError('link_cardinality', `Поле «${def.label}» допускает только одну связь`, { field })]);
     }
     const newIds: string[] = [];
     for (const [index, op] of ops.entries()) {
-      if (repeated.has(`${field} ${index}`)) continue;
-      try {
-        if (isDelete(op)) {
-          deleteRow();
-        } else if (isChange(op)) {
+      if (opErrors.has(opKey(field, index))) continue; // a row named twice
+      if (isDelete(op)) {
+        deleteRow();
+      } else if (isChange(op)) {
+        await attempt(field, index, async () => {
           const stored = locked.get(op.id);
-          if (stored === undefined || stored.workspaceId !== steps.workspaceId
-            || stored.ownerId !== owner.id || stored.ownerField !== field) {
+          if (stored === undefined || stored.ownerId !== owner.id || stored.ownerField !== field) {
             throw new SaveFailed([recordError(
               'link_owned', `Поле «${def.label}»: запись ${op.id} не является строкой этого поля этой записи`, { field },
             )]);
           }
           if (stored.archivedAt !== null) throw new SaveFailed([archived(op.id)]);
           if (stored.version !== op.version) throw new SaveFailed([versionConflict(op.id)]);
-          const { seed } = await steps.updateIn(tx, {
+          const { seed, sets } = await steps.updateIn(tx, {
             id: op.id, userId: owner.userId, expectedVersion: op.version, title: op.title, data: op.data,
             enableSets: op.enableSets, disableSets: op.disableSets,
           }, stored);
+          requireTargetSet(field, sets);
           seeds.push(seed);
-        } else {
-          const { id, seed, sets } = await steps.createIn(
-            tx, { userId: owner.userId, title: op.title ?? '', data: op.data, sets: op.sets }, { id: owner.id, field },
-          );
-          const wanted = def.target_sets ?? [];
-          if (!wanted.some((s) => sets.has(s))) {
-            const names = wanted.map((s) => `«${cfg.sets.get(s)?.label ?? s}»`).join(', ');
-            throw new SaveFailed([recordError('link_target', `Поле «${def.label}»: у строки нет набора ${names}`, { field })]);
-          }
-          seeds.push(seed);
-          newIds.push(id);
-        }
-      } catch (e) {
-        if (!(e instanceof SaveFailed)) throw e;
-        errors.push(...e.errors.map(atRow(field, index)));
+        });
+      } else {
+        const row = await attempt(field, index, () => steps.insertIn(
+          tx, { userId: owner.userId, title: op.title ?? '', data: op.data, sets: op.sets }, { id: owner.id, field },
+        ));
+        if (row === null) continue;
+        inserted.push({ field, index, row });
+        newIds.push(row.id);
       }
     }
     targets.set(field, [...before, ...newIds]);
   }
-  if (errors.length > 0) throw new SaveFailed(errors);
 
+  // Linked before the new rows are evaluated, so that their rollups over the owner see it.
   const changedLinks: LinkChange[] = [];
   for (const [field, ids] of targets) {
     const change = await steps.replaceLinksLogged(tx, owner.id, owner.userId, field, ids);
     if (change !== null) changedLinks.push(change);
   }
+  for (const { field, index, row } of inserted) {
+    await attempt(field, index, async () => {
+      const { seed, sets } = await steps.finishCreateIn(tx, owner.userId, row);
+      requireTargetSet(field, sets);
+      seeds.push(seed);
+    });
+  }
+
+  const errors: RecordError[] = [];
+  for (const field of fields) {
+    errors.push(...fieldErrors.get(field) ?? []);
+    for (const index of rows[field]!.keys()) errors.push(...opErrors.get(opKey(field, index)) ?? []);
+  }
+  if (errors.length > 0) throw new SaveFailed(errors);
   return { seeds, changedLinks };
 }

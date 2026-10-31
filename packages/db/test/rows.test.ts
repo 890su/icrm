@@ -3,7 +3,7 @@ import { loadConfigDir } from '@icrm/core/node';
 import type { Value } from '@icrm/core';
 import type { Kysely } from 'kysely';
 import { beforeAll, describe, expect, test } from 'vitest';
-import { RecordService, type DB, type RecordView, type SaveResult } from '../src/index.js';
+import { ensureWorkspace, RecordService, type DB, type RecordView, type SaveResult } from '../src/index.js';
 import { freshDb } from './setup-pg.js';
 
 const CONFIG_DIR = fileURLToPath(new URL('./fixtures/rows/', import.meta.url));
@@ -78,8 +78,28 @@ describe('rows on create', () => {
       expect.objectContaining({ field_key: 'expenses', old: [], new: owner.links.expenses, source: 'user', user_id: userId }),
     ]);
     const rowValues = (await changeLog(a.id)).filter((e) => e.kind === 'value').map((e) => [e.field_key, e.source]);
-    expect(rowValues).toEqual(expect.arrayContaining([['amount', 'user'], ['expense_kind', 'user'], ['task_rate', 'cascade']]));
+    // task_rate is computed in the row's own save (the owner is linked by then), not by the cascade
+    expect(rowValues).toEqual(expect.arrayContaining([['amount', 'user'], ['expense_kind', 'user'], ['task_rate', 'rule'], ['cost', 'rule']]));
     expect((await changeLog(owner.id)).some((e) => e.field_key === 'amount')).toBe(false);
+  });
+
+  test('new rows see the owner\'s stored values while they are evaluated', async () => {
+    // big_expense_cost_known: a row of 1000+ needs `cost`, which needs `task_rate` from the owner
+    const r = record(await svc.create({ userId, title: 'T', sets: ['task'], data: { rate: 2 }, rows: { expenses: [
+      expense({ amount: 1000 }),
+    ] } }));
+    expect(await must(r.links.expenses![0]!)).toMatchObject({ data: { amount: 1000, task_rate: 2, cost: 2000 } });
+
+    const added = record(await svc.update({ id: r.id, userId, expectedVersion: r.version, rows: { expenses: [
+      expense({ amount: 1500 }),
+    ] } }));
+    expect(await must(added.links.expenses![1]!)).toMatchObject({ data: { task_rate: 2, cost: 3000 } });
+
+    // the rule is real: without an owner rate the row has no cost
+    const noRate = await svc.create({ userId, title: 'T', sets: ['task'], rows: { expenses: [expense({ amount: 1000 })] } });
+    expect(noRate).toMatchObject({ ok: false, errors: [
+      expect.objectContaining({ code: 'required', field: 'cost', row: { field: 'expenses', index: 0 } }),
+    ] });
   });
 
   test('create without rows behaves as before', async () => {
@@ -174,7 +194,27 @@ describe('row errors', () => {
     expect((await must(owner.id)).version).toBe(owner.version);
   });
 
-  test('an error of the owner rolls back its rows', async () => {
+  test('an owner evaluation error after its rows were written rolls everything back', async () => {
+    const { owner, a } = await taskWithRows();
+    const before = await must(owner.id);
+    const res = await svc.update({ id: owner.id, userId, expectedVersion: owner.version, rows: { expenses: [
+      { id: a.id, version: a.version, data: { amount: 3000 } }, expense({ amount: 3000 }),
+    ] } });
+    expect(res).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'required', field: 'task_note', rule_id: 'big_total_needs_note' })] });
+    expect(res.ok === false && res.errors[0]!.row).toBeUndefined();
+    expect(await must(owner.id)).toEqual(before);
+    expect(await must(a.id)).toEqual(a);
+    expect(await db.selectFrom('records').select('id').where('owner_id', '=', owner.id).execute()).toHaveLength(2);
+
+    const title = 'Владелец с ошибкой';
+    const created = await svc.create({ userId, title, sets: ['task'], data: { rate: 1 }, rows: { expenses: [expense({ amount: 6000 })] } });
+    expect(created).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'required', field: 'task_note' })] });
+    expect(await db.selectFrom('records').select('id').where('title', '=', title).execute()).toEqual([]);
+    expect(await db.selectFrom('records').select('id').where('owner_id', 'is not', null)
+      .where('data', '@>', JSON.stringify({ amount: 6000 }) as never).execute()).toEqual([]);
+  });
+
+  test('an input error of the owner stops the save before its rows', async () => {
     const { owner, a } = await taskWithRows();
     const res = await svc.update({ id: owner.id, userId, expectedVersion: owner.version, data: { no_such_field: 1 }, rows: { expenses: [
       { id: a.id, version: a.version, data: { amount: 99 } }, expense({ amount: 1 }),
@@ -215,6 +255,30 @@ describe('row errors', () => {
     ] } });
     expect(wrongField).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'link_owned', row: { field: 'expenses', index: 0 } })] });
     expect(await must(standalone.id)).toEqual(standalone);
+  });
+
+  test('a changed row must keep a target set → link_target with row', async () => {
+    const { owner, b } = await taskWithRows();
+    const res = await svc.update({ id: owner.id, userId, expectedVersion: owner.version, rows: { expenses: [
+      { id: b.id, version: b.version, disableSets: ['expense'] },
+    ] } });
+    expect(res).toMatchObject({ ok: false, errors: [
+      expect.objectContaining({ code: 'link_target', field: 'expenses', row: { field: 'expenses', index: 0 } }),
+    ] });
+    expect(await must(b.id)).toEqual(b);
+  });
+
+  test('a row of another workspace → link_owned', async () => {
+    const { workspaceId: otherWs } = await ensureWorkspace(db, 'other');
+    const otherSvc = new RecordService({ db, cfg: await loadConfigDir(CONFIG_DIR), workspaceId: otherWs, now: () => NOW });
+    const theirs = record(await otherSvc.create({ userId, title: 'Чужой', sets: ['task'], rows: { expenses: [expense({ amount: 1 })] } }));
+    const theirRow = (await otherSvc.get(theirs.links.expenses![0]!))!;
+    const { owner } = await taskWithRows();
+    const res = await svc.update({ id: owner.id, userId, expectedVersion: owner.version, rows: { expenses: [
+      { id: theirRow.id, version: theirRow.version, data: { amount: 2 } },
+    ] } });
+    expect(res).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: 'link_owned', row: { field: 'expenses', index: 0 } })] });
+    expect(await otherSvc.get(theirRow.id)).toEqual(theirRow);
   });
 
   test('stale row version → version_conflict with row', async () => {

@@ -15,7 +15,7 @@ import {
 import { archived, notFound, recordError, SaveFailed, versionConflict } from './errors.js';
 import { fieldInEnabledSet, sameValue } from './fields.js';
 import { withRetry } from './retry.js';
-import { NO_ROWS, saveRows, type RowOp, type RowSteps } from './rows.js';
+import { noRows, saveRows, type RowOp, type RowSteps } from './rows.js';
 
 export interface RecordView {
   id: string;
@@ -79,7 +79,7 @@ export interface UpdateInput {
 }
 
 /** A record `insertIn` inserted (version 0) and `finishCreateIn` has yet to evaluate. */
-interface Inserted {
+export interface Inserted {
   id: string;
   input: Record<string, Value>;
   sets: Map<string, string>;
@@ -132,7 +132,7 @@ export class RecordService {
     return this.inTransaction(async (tx) => {
       const inserted = await this.insertIn(tx, i);
       const batch = i.rows === undefined
-        ? NO_ROWS
+        ? noRows()
         : await saveRows(this.rowSteps(), tx, { id: inserted.id, userId: i.userId, sets: inserted.sets }, i.rows);
       const { seed } = await this.finishCreateIn(tx, i.userId, inserted, batch.changedLinks);
       await this.cascade(tx, i.userId, [...batch.seeds, seed]);
@@ -150,7 +150,7 @@ export class RecordService {
       const stored = await this.lockEditable(tx, i.id, i.expectedVersion);
       const prepared = this.prepareUpdate(i, stored);
       const batch = i.rows === undefined
-        ? NO_ROWS
+        ? noRows()
         : await saveRows(this.rowSteps(), tx, { id: i.id, userId: i.userId, sets: prepared.sets }, i.rows);
       const { seed } = await this.finishUpdateIn(tx, i, stored, prepared, batch.changedLinks);
       await this.cascade(tx, i.userId, [...batch.seeds, seed]);
@@ -266,23 +266,12 @@ export class RecordService {
   }
 
   /**
-   * The create step, inside the caller's transaction: validates the input, inserts the record (version 0,
-   * owned by `owner` when given — a row), sets its links, evaluates and writes it (version 1). Does not
-   * cascade: the returned seed is for the caller to cascade once everything it saves together is written.
-   * `sets` are the record's sets after evaluation.
-   */
-  private async createIn(
-    tx: Db, i: CreateInput, owner?: { id: string; field: string },
-  ): Promise<{ id: string; seed: CascadeSeed; sets: Map<string, string> }> {
-    const inserted = await this.insertIn(tx, i, owner);
-    const { seed, sets } = await this.finishCreateIn(tx, i.userId, inserted, []);
-    return { id: inserted.id, seed, sets };
-  }
-
-  /**
-   * First half of `createIn`: validates the input, inserts the record at version 0 (so that links can point
-   * from it; the evaluated state written over it makes it version 1) and sets its links. `sets` are the
-   * manually enabled sets (with closure) before evaluation.
+   * The create step, inside the caller's transaction, is `insertIn` then `finishCreateIn`; neither cascades:
+   * the seed is for the caller to cascade once everything it saves together is written.
+   *
+   * `insertIn` validates the input, inserts the record at version 0 (owned by `owner` when given: a row) so
+   * that links can point from and to it, and sets its links. `sets` are the manually enabled sets (with
+   * closure) before evaluation.
    */
   private async insertIn(tx: Db, i: CreateInput, owner?: { id: string; field: string }): Promise<Inserted> {
     const id = uuidv7();
@@ -308,8 +297,9 @@ export class RecordService {
   }
 
   /**
-   * Second half of `createIn`: evaluates the inserted record (its rollups and links as stored now) and
+   * Second half of the create step: evaluates the inserted record (its rollups and links as stored now) and
    * writes it (version 1). `moreLinks` are link changes made since `insertIn` (the owned links of rows).
+   * `sets` are the record's sets after evaluation.
    */
   private async finishCreateIn(
     tx: Db, userId: string, ins: Inserted, moreLinks: LinkChange[],
@@ -331,7 +321,9 @@ export class RecordService {
    * The update step, inside the caller's transaction, for `stored` (already locked, of this workspace, at
    * `i.expectedVersion`, not archived). Does not cascade: the returned seed is for the caller.
    */
-  private async updateIn(tx: Db, i: UpdateInput, stored: StoredRecord): Promise<{ seed: CascadeSeed }> {
+  private async updateIn(
+    tx: Db, i: UpdateInput, stored: StoredRecord,
+  ): Promise<{ seed: CascadeSeed; sets: Map<string, string> }> {
     return this.finishUpdateIn(tx, i, stored, this.prepareUpdate(i, stored), []);
   }
 
@@ -350,11 +342,11 @@ export class RecordService {
 
   /**
    * Second half of `updateIn`: evaluates and writes the record. `moreLinks` are link changes made in this
-   * save before it (the owned links of rows).
+   * save before it (the owned links of rows). `sets` are the record's sets after evaluation.
    */
   private async finishUpdateIn(
     tx: Db, i: UpdateInput, stored: StoredRecord, p: PreparedUpdate, moreLinks: LinkChange[],
-  ): Promise<{ seed: CascadeSeed }> {
+  ): Promise<{ seed: CascadeSeed; sets: Map<string, string> }> {
     const { prev, input } = p;
     const userChangedKeys = new Set(Object.keys(input).filter((k) => !sameValue(prev.data[k], input[k])));
     const next: RecordState = { data: { ...prev.data, ...input }, sets: p.sets };
@@ -362,9 +354,9 @@ export class RecordService {
     await this.persist(tx, stored, prev, res, i.userId, userChangedKeys, i.expectedVersion);
     const seed: CascadeSeed = {
       recordId: i.id, changedKeys: res.changedKeys, changedSets: changedSetKeys(prev.sets, res.state.sets),
-      changedLinks: moreLinks,
+      changedLinks: [...moreLinks],
     };
-    return { seed };
+    return { seed, sets: res.state.sets };
   }
 
   /** The steps `saveRows` runs rows through. */
@@ -372,7 +364,8 @@ export class RecordService {
     return {
       cfg: this.cfg,
       workspaceId: this.workspaceId,
-      createIn: (tx, i, owner) => this.createIn(tx, i, owner),
+      insertIn: (tx, i, owner) => this.insertIn(tx, i, owner),
+      finishCreateIn: (tx, userId, inserted) => this.finishCreateIn(tx, userId, inserted, []),
       updateIn: (tx, i, stored) => this.updateIn(tx, i, stored),
       replaceLinksLogged: (tx, id, userId, field, targetIds) => this.replaceLinksLogged(tx, id, userId, field, targetIds),
     };

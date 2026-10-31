@@ -20,18 +20,20 @@ export interface StoredRecord {
 /**
  * Loads records with their enabled sets. Ids that do not exist are absent from the map.
  * With `forUpdate` the rows are locked (`SELECT ... FOR UPDATE`) in id order, which gives
- * concurrent savers a consistent lock order and so avoids deadlocks.
+ * concurrent savers a consistent lock order and so avoids deadlocks. With `workspaceId` only records of that
+ * workspace are loaded (and locked).
  */
 export async function loadRecords(
   tx: Db,
   ids: string[],
-  opts: { forUpdate?: boolean } = {},
+  opts: { forUpdate?: boolean; workspaceId?: string } = {},
 ): Promise<Map<string, StoredRecord>> {
   const out = new Map<string, StoredRecord>();
   if (ids.length === 0) return out;
   const unique = [...new Set(ids)];
 
   let q = tx.selectFrom('records').selectAll().where('id', 'in', unique).orderBy('id');
+  if (opts.workspaceId !== undefined) q = q.where('workspace_id', '=', opts.workspaceId);
   if (opts.forUpdate) q = q.forUpdate();
   const rows = await q.execute();
   if (rows.length === 0) return out;
