@@ -4,6 +4,7 @@ import {
 } from '@icrm/core';
 import { sql, type Kysely } from 'kysely';
 import { uuidv7 } from 'uuidv7';
+import type { MembershipView } from '../contacts/memberships.js';
 import { appendChangeLog, type ChangeEntry } from '../repo/change-log.js';
 import { ancestorsVia, linksFrom, replaceLinks } from '../repo/links.js';
 import type { IdentityView } from '../repo/identities.js';
@@ -46,6 +47,8 @@ export interface RecordView {
   rows?: Record<string, RowView[]>;
   /** The live channel addresses (spec 2a §3), oldest first; set by the contact behaviours for a record with the contact, membership or organization set. */
   identities?: IdentityView[];
+  /** The live memberships (spec 2a §2.4) of a contact (by `contact`) or an organization (by `organization`): active first; set by the contact behaviours. */
+  memberships?: MembershipView[];
 }
 
 /** A row as shown inside its owner: a record view without its own `rows`. */
@@ -151,8 +154,8 @@ const stateOf = (r: StoredRecord): RecordState => ({ data: { ...r.data, title: r
  * after the last attempt that error is thrown. A unique violation of a constraint in `UNIQUE_ERRORS` comes
  * back as its error. Several saves can share one transaction and one cascade (`transaction`).
  *
- * Behaviours of sets (`SetBehavior`) hook into every save: `beforeEvaluate` in `finishCreateIn` and
- * `finishUpdateIn` (so rows get them too), `afterWrite` at the end of `persist`, `archived` at the end of
+ * Behaviours of sets (`SetBehavior`) hook into every save: `beforeInsert` in `insertIn`, `beforeEvaluate` in
+ * `finishCreateIn` and `finishUpdateIn` (so rows get them too), `afterWrite` at the end of `persist`, `archived` at the end of
  * `archiveIn`, `extendView` in `view`. Fields marked `managed` are only set by saves with `system: true`.
  */
 export class RecordService {
@@ -457,6 +460,10 @@ export class RecordService {
     const sets = new Map<string, string>();
     this.enableManualSets(sets, i.sets ?? [], errors);
     const input = this.knownInput({ ...i.data, title: i.title }, null, errors);
+    if (errors.length > 0) throw new SaveFailed(errors);
+    for (const b of behaviorsOf(this.behaviors, sets)) {
+      if (b.beforeInsert !== undefined) errors.push(...await b.beforeInsert(this.ctx(tx, i.userId), { input, sets }));
+    }
     if (errors.length > 0) throw new SaveFailed(errors);
 
     await this.lockHierarchies(tx, Object.keys(i.links ?? {}));

@@ -18,6 +18,7 @@ export {
   IdentityService, OWNER_SETS, type IdentityResult, type IdentityView,
 } from './contacts/identities.js';
 export { contactBehaviors } from './contacts/behaviors.js';
+export { isActiveOn, membershipsOf, type MembershipView } from './contacts/memberships.js';
 export { createServices, type Services } from './services.js';
 export { isRetryable } from './service/retry.js';
 export type { ChangeRowOp, DeleteRowOp, NewRowOp, RowOp } from './service/rows.js';

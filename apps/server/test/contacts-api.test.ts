@@ -108,3 +108,35 @@ describe('identities', () => {
     }
   });
 });
+
+describe('organizations and memberships', () => {
+  test('a bad NIP → 422 nip_invalid; a taken one names its owner; a good one is normalised', async () => {
+    const bad = await call('POST', '/records', { title: 'Firma API', sets: ['organization'], data: { nip: '5260250275' } });
+    expect(bad.statusCode).toBe(422);
+    expect(bad.json().errors).toEqual([expect.objectContaining({ code: 'nip_invalid', field: 'nip' })]);
+
+    const ok = await call('POST', '/records', { title: 'Firma API', sets: ['organization'], data: { nip: 'PL 526-025-02-74' } });
+    expect(ok.statusCode, ok.body).toBe(201);
+    expect(ok.json().data.nip).toBe('5260250274');
+    const taken = await call('POST', '/records', { title: 'Druga', sets: ['organization'], data: { nip: '5260250274' } });
+    expect(taken.statusCode).toBe(422);
+    expect(taken.json().errors).toEqual([expect.objectContaining({
+      code: 'nip_taken', ownerId: ok.json().id, ownerTitle: 'Firma API' })]);
+  });
+
+  test('a membership gets a title and shows up in the views of its contact and organization', async () => {
+    const anna = await create('Anna API', ['contact']);
+    const org = await create('Firma M', ['organization']);
+    const m = await call('POST', '/records', { title: '', sets: ['membership'], links: { contact: [anna.id], organization: [org.id] } });
+    expect(m.statusCode, m.body).toBe(201);
+    expect(m.json().title).toBe('Anna API — Firma M');
+    const again = await call('POST', '/records', { title: '', sets: ['membership'], links: { contact: [anna.id], organization: [org.id] } });
+    expect(again.statusCode).toBe(422);
+    expect(again.json().errors[0].code).toBe('membership_active_exists');
+    for (const id of [anna.id, org.id]) {
+      const view = (await call('GET', `/records/${id}`)).json();
+      expect(view.memberships).toEqual([expect.objectContaining({
+        id: m.json().id, contactTitle: 'Anna API', organizationTitle: 'Firma M', active: true })]);
+    }
+  });
+});

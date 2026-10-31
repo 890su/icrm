@@ -14,7 +14,9 @@ export interface Services {
 export function createServices(o: {
   db: Kysely<DB>; cfg: CompiledConfig; workspaceId: string; now?: () => Date;
 }): Services {
+  const now = o.now ?? ((): Date => new Date());
   const identities = new IdentityService(o);
-  const records = new RecordService({ ...o, behaviors: contactBehaviors(identities) });
+  const behaviors = contactBehaviors(identities, { cfg: o.cfg, workspaceId: o.workspaceId, now });
+  const records = new RecordService({ ...o, behaviors });
   return { records, identities };
 }

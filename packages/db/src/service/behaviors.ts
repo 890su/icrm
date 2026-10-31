@@ -19,6 +19,10 @@ export interface BehaviorContext {
  */
 export interface SetBehavior {
   set: string;
+  /** Before a new record is inserted, for a record whose manually enabled sets (with closure) include `set`;
+   *  may change `input` in place. The record does not exist yet, so a value that would collide with a unique
+   *  index can be normalised or rejected before the insert. */
+  beforeInsert?(ctx: BehaviorContext, r: { input: Record<string, Value>; sets: Map<string, string> }): Promise<RecordError[]>;
   /** Before evaluation of a record whose pre-evaluation sets include `set`; may change `input` in place
    *  (links of a new record are already stored). `prev` is null on create. */
   beforeEvaluate?(ctx: BehaviorContext, r: {
