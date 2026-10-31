@@ -705,6 +705,14 @@ describe('readonly owned field and target sets (spec §1.12 item 3)', () => {
     const totals = (await changeLog(owner.id)).filter((e) => e.kind === 'value' && e.field_key === 'expenses_total').at(-1);
     expect(totals).toMatchObject({ old: 15, new: 16, source: 'cascade', user_id: userId });
   });
+
+  test('a row whose owned field left the config can still be patched directly', async () => {
+    const { a } = await taskWithRows();
+    // As after deleting the owned field from the config without `was:`.
+    await db.updateTable('records').set({ owner_field: 'gone_field' }).where('id', '=', a.id).execute();
+    const res = record(await svc.update({ id: a.id, userId, expectedVersion: a.version, data: { amount: 12 } }));
+    expect(res.data.amount).toBe(12);
+  });
 });
 
 describe('lock order of direct saves of a row (owner before row)', () => {

@@ -85,7 +85,9 @@ export const noRows = (): RowsResult => ({ seeds: [], changedLinks: [], budget: 
  * `target_sets` of its owned field `field`: a row must stay a valid target of its owner's link (spec §1.12).
  */
 export function requireTargetSet(cfg: CompiledConfig, field: string, sets: Map<string, string>): void {
-  const def = cfg.fields.get(field)!;
+  // A field that is no longer an owned link (removed or changed in the config) has no target sets to keep.
+  const def = cfg.fields.get(field);
+  if (def?.owned !== true) return;
   const wanted = def.target_sets ?? [];
   if (wanted.some((s) => sets.has(s))) return;
   const names = wanted.map((s) => `«${cfg.sets.get(s)?.label ?? s}»`).join(', ');
