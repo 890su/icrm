@@ -17,6 +17,7 @@ export { UNIQUE_ERRORS, uniqueViolation } from './service/errors.js';
 export {
   IdentityService, OWNER_SETS, type IdentityResult, type IdentityView,
 } from './contacts/identities.js';
+export { ContactService, type RecordRef, type ResolveResult } from './contacts/contact-service.js';
 export { contactBehaviors } from './contacts/behaviors.js';
 export { isActiveOn, membershipsOf, type MembershipView } from './contacts/memberships.js';
 export { createServices, type Services } from './services.js';

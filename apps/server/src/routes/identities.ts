@@ -1,4 +1,4 @@
-import type { IdentityResult, IdentityService } from '@icrm/db';
+import type { ContactService, IdentityResult, IdentityService } from '@icrm/db';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { statusOf } from '../errors.js';
@@ -12,6 +12,7 @@ const patchBody = z.strictObject({
 });
 const moveBody = z.strictObject({ to: z.guid() });
 const searchQuery = z.strictObject({ q: z.string() });
+const lookupQuery = z.strictObject({ channel: z.string(), address: z.string() });
 
 /** Sends the identity with `okStatus`, or the service's errors with the status they map to. */
 function sendIdentity(reply: FastifyReply, res: IdentityResult, okStatus: number): FastifyReply {
@@ -19,7 +20,7 @@ function sendIdentity(reply: FastifyReply, res: IdentityResult, okStatus: number
 }
 
 export function registerIdentityRoutes(
-  app: FastifyInstance, o: { identities: IdentityService; systemUserId: string },
+  app: FastifyInstance, o: { identities: IdentityService; contacts: ContactService; systemUserId: string },
 ): void {
   const userId = o.systemUserId;
 
@@ -44,6 +45,15 @@ export function registerIdentityRoutes(
   app.delete('/identities/:id', async (req, reply) => {
     const { id } = idParams.parse(req.params);
     return sendIdentity(reply, await o.identities.archive({ id, userId }), 200);
+  });
+
+  // Matches an incoming address to its owner and counterparty (spec 2a §4).
+  app.get('/identities/lookup', async (req, reply) => {
+    const { channel, address } = lookupQuery.parse(req.query);
+    const res = await o.contacts.resolveAddress(channel, address);
+    if (!res.ok) return reply.code(statusOf(res.errors)).send({ errors: res.errors });
+    const { ok: _ok, ...body } = res;
+    return body;
   });
 
   app.get('/identities', async (req) => {

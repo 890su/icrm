@@ -109,6 +109,35 @@ describe('identities', () => {
   });
 });
 
+describe('address lookup', () => {
+  test('known address → owner and counterparty; unknown email → domain hints; bad input → 422 / 400', async () => {
+    const anna = await create('Anna L', ['contact']);
+    const org = (await call('POST', '/records', {
+      title: 'Firma L', sets: ['organization'], data: { email_domains: ['firma-l.pl'] } })).json();
+    await call('POST', '/records', { title: '', sets: ['membership'], links: { contact: [anna.id], organization: [org.id] } });
+    await call('POST', `/records/${anna.id}/identities`, { channel: 'email', address: 'anna.l@prywatna-l.pl' });
+
+    const found = await call('GET', '/identities/lookup?channel=email&address=Anna.L%40Prywatna-L.pl');
+    expect(found.statusCode, found.body).toBe(200);
+    expect(found.json()).toMatchObject({
+      identity: { ownerId: anna.id, address: 'anna.l@prywatna-l.pl' }, contact: { id: anna.id, title: 'Anna L' },
+      membership: null, organization: { id: org.id, title: 'Firma L' }, membershipEnded: false, hints: [] });
+    expect(found.json()).not.toHaveProperty('ok');
+
+    const unknown = await call('GET', '/identities/lookup?channel=email&address=nowy%40firma-l.pl');
+    expect(unknown.statusCode).toBe(200);
+    expect(unknown.json()).toEqual({
+      identity: null, contact: null, membership: null, organization: null, membershipEnded: false,
+      hints: [{ id: org.id, title: 'Firma L' }] });
+
+    const invalid = await call('GET', '/identities/lookup?channel=phone&address=12');
+    expect(invalid.statusCode).toBe(422);
+    expect(invalid.json().errors[0].code).toBe('invalid_address');
+    expect((await call('GET', '/identities/lookup?channel=phone')).statusCode).toBe(400);
+    expect((await call('GET', '/identities/lookup')).statusCode).toBe(400);
+  });
+});
+
 describe('organizations and memberships', () => {
   test('a bad NIP → 422 nip_invalid; a taken one names its owner; a good one is normalised', async () => {
     const bad = await call('POST', '/records', { title: 'Firma API', sets: ['organization'], data: { nip: '5260250275' } });

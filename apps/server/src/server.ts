@@ -42,7 +42,7 @@ export function buildServer(o: ServerOptions): FastifyInstance {
   const services = createServices({ db: o.db, cfg: o.cfg, workspaceId: o.workspaceId, now });
   registerMetaRoutes(app, o);
   registerRecordRoutes(app, { service: services.records, systemUserId: o.systemUserId });
-  registerIdentityRoutes(app, { identities: services.identities, systemUserId: o.systemUserId });
+  registerIdentityRoutes(app, { identities: services.identities, contacts: services.contacts, systemUserId: o.systemUserId });
   registerQueryRoutes(app, { db: o.db, cfg: o.cfg, workspaceId: o.workspaceId, now });
   return app;
 }

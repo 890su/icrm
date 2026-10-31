@@ -1,6 +1,7 @@
 import type { CompiledConfig } from '@icrm/core';
 import type { Kysely } from 'kysely';
 import { contactBehaviors } from './contacts/behaviors.js';
+import { ContactService } from './contacts/contact-service.js';
 import { IdentityService } from './contacts/identities.js';
 import type { DB } from './schema.js';
 import { RecordService } from './service/record-service.js';
@@ -9,6 +10,7 @@ import { RecordService } from './service/record-service.js';
 export interface Services {
   records: RecordService;
   identities: IdentityService;
+  contacts: ContactService;
 }
 
 export function createServices(o: {
@@ -18,5 +20,6 @@ export function createServices(o: {
   const identities = new IdentityService(o);
   const behaviors = contactBehaviors(identities, { cfg: o.cfg, workspaceId: o.workspaceId, now });
   const records = new RecordService({ ...o, behaviors });
-  return { records, identities };
+  const contacts = new ContactService({ ...o, records, identities });
+  return { records, identities, contacts };
 }
