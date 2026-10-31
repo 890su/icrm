@@ -13,6 +13,7 @@ export {
   type SetLinksInput, type UpdateInput,
 } from './service/record-service.js';
 export { isRetryable } from './service/retry.js';
+export type { ChangeRowOp, DeleteRowOp, NewRowOp, RowOp } from './service/rows.js';
 export {
   CASCADE_LIMIT, evaluateWithRollups, refreshOwnRollups, runCascade, type CascadeSeed, type RollupHolder,
 } from './service/cascade.js';

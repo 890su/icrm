@@ -1,0 +1,55 @@
+# Record rows (spec §1.12): a task owns expense rows; totals over rows, owner values inside rows.
+fields:
+  rate: {type: number, label: Ставка}
+  expenses:
+    type: link
+    label: Расходы
+    target_sets: [expense]
+    cardinality: many
+    owned: true
+    inverse_label: Задача
+  primary_expense:
+    type: link
+    label: Основной расход
+    target_sets: [expense]
+    cardinality: one
+    owned: true
+    inverse_label: Задача (основной расход)
+  expenses_total: {type: rollup, label: Сумма расходов, via: expenses, field: amount, agg: sum}
+  transport_total:
+    type: rollup
+    label: Транспортные расходы
+    via: expenses
+    field: amount
+    agg: sum
+    filter: '{expense_kind} = "транспортные"'
+  expense_kind: {type: enum, label: Вид расхода, options: [транспортные, комплектующие]}
+  amount: {type: number, label: Сумма}
+  note: {type: text, label: Примечание}
+  task_rate: {type: rollup, label: Ставка задачи, via: expenses, direction: inverse, field: rate, agg: first}
+  cost: {type: formula, label: Стоимость, expr: '{amount} * {task_rate}'}
+  distance_km: {type: number, label: 'Расстояние, км'}
+  budget_lines:
+    type: link
+    label: Строки бюджета
+    target_sets: [expense]
+    owned: true
+    inverse_label: Бюджет
+  memo: {type: text, label: Памятка}
+sets:
+  task: {label: Задача, fields: [title, rate, expenses, primary_expense, expenses_total, transport_total]}
+  expense: {label: Расход, fields: [expense_kind, amount, note, task_rate, cost]}
+  expense_transport:
+    label: Транспортный расход
+    activation: rule
+    requires: [expense]
+    fields: [distance_km]
+  budget: {label: Бюджет, fields: [budget_lines]}
+  memo: {label: Памятка, fields: [memo]}
+rules:
+  - id: transport_fields
+    when: '{expense_kind} = "транспортные"'
+    enable_set: expense_transport
+  - id: expense_amount_required
+    when: 'HAS_SET("expense")'
+    require: [amount]
