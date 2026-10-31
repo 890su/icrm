@@ -77,7 +77,9 @@ describe('parseConfigFiles', () => {
 
   test('empty file contributes nothing', () => {
     const raw = parseConfigFiles([file('a.yaml', ''), file('b.yaml', '# only a comment\n')]);
-    expect(raw).toEqual({ timezone: 'Europe/Warsaw', fields: [], sets: [], rules: [] });
+    expect(raw).toEqual({
+      timezone: 'Europe/Warsaw', phoneRegion: 'PL', fields: [], sets: [], rules: [], extendSets: [], extendFields: [],
+    });
   });
 
   test('duplicate field key across files is an issue naming both files', () => {

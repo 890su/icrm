@@ -29,6 +29,10 @@ export interface FieldDef {
   hierarchical?: boolean;
   /** Link targets are rows owned by the source record (spec §1.12). */
   owned?: boolean;
+  /** Defined in the built-in part of the config (`SYSTEM_FILE`); users can only `extend` it. */
+  system?: boolean;
+  /** Written by code only; allowed in the built-in part only. */
+  managed?: boolean;
   expr?: string;
   via?: string;
   direction?: 'forward' | 'inverse';
@@ -41,6 +45,7 @@ export interface FieldDef {
 export interface SetDef {
   key: string;
   label: string;
+  /** By file (`SYSTEM_FILE`), not by YAML. */
   system: boolean;
   fields: string[];
   requires: string[];
@@ -65,6 +70,10 @@ export interface RuleDef {
 
 export interface RawConfig {
   timezone: string;
+  /** Default region (ISO 3166-1 alpha-2) for phone numbers without a country code. */
+  phoneRegion: string;
+  extendSets: { set: string; fields: string[]; src: SourceRef }[];
+  extendFields: { field: string; label?: string; options?: string[]; src: SourceRef }[];
   fields: FieldDef[];
   sets: SetDef[];
   rules: RuleDef[];
@@ -72,6 +81,7 @@ export interface RawConfig {
 
 export const KEY_RE = /^[a-z][a-z0-9_]*$/;
 export const DEFAULT_TIMEZONE = 'Europe/Warsaw';
+export const DEFAULT_PHONE_REGION = 'PL';
 
 const str = z.string();
 const strList = z.array(z.string());
@@ -80,6 +90,7 @@ const common = {
   label: str,
   indexed: z.boolean().optional(),
   was: str.optional(),
+  managed: z.boolean().optional(),
 };
 
 const field = z.discriminatedUnion('type', [
@@ -118,7 +129,6 @@ const field = z.discriminatedUnion('type', [
 
 const set = z.strictObject({
   label: str,
-  system: z.boolean().default(false),
   fields: strList,
   requires: strList.default([]),
   activation: z.enum(['manual', 'rule', 'both']).default('manual'),
@@ -150,10 +160,22 @@ const timezone = z.string().refine(
   { message: 'unknown IANA time zone' },
 );
 
+const extend = z.strictObject({
+  sets: z.record(z.string(), z.strictObject({ fields: strList })).optional(),
+  fields: z.record(z.string(), z.strictObject({
+    label: str.optional(),
+    options: z.array(z.string()).min(1).optional(),
+  })).optional(),
+});
+
 /** Shape of one config file. All top-level sections are optional. */
 export const fileSchema = z.strictObject({
-  workspace: z.strictObject({ timezone: timezone.optional() }).optional(),
+  workspace: z.strictObject({
+    timezone: timezone.optional(),
+    phone_region: z.string().regex(/^[A-Z]{2}$/, { message: 'ожидается код страны из двух заглавных букв, например PL' }).optional(),
+  }).optional(),
   fields: z.record(z.string(), field).optional(),
   sets: z.record(z.string(), set).optional(),
   rules: z.array(rule).optional(),
+  extend: extend.optional(),
 });

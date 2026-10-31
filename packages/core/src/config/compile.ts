@@ -45,6 +45,7 @@ export interface CompiledRollup {
 
 export interface CompiledConfig {
   timezone: string;
+  phoneRegion: string;
   /** All fields, including the built-in `title`. */
   fields: Map<string, CompiledField>;
   sets: Map<string, CompiledSet>;
@@ -133,10 +134,34 @@ export function compileConfig(raw: RawConfig): CompiledConfig {
 
   const defs = new Map<string, FieldDef>([[TITLE.key, TITLE], ...raw.fields.map((f) => [f.key, f] as const)]);
   const setDefs = new Map(raw.sets.map((s) => [s.key, s]));
+
+  // --- extend: user additions to the built-in part, applied before any other check -------------
+  for (const x of raw.extendFields) {
+    const err = errAt(x.src);
+    const d = defs.get(x.field);
+    if (d === undefined) err('', `поле "${x.field}" не найдено`);
+    else if (d.system !== true) err('', 'extend меняет только системные поля');
+    else if (x.options !== undefined && d.type !== 'enum') err('options', 'options допустимы только у enum');
+    else defs.set(x.field, { ...d, label: x.label ?? d.label, ...(x.options === undefined ? {} : { options: x.options }) });
+  }
+  for (const x of raw.extendSets) {
+    const err = errAt(x.src);
+    const s = setDefs.get(x.set);
+    if (s === undefined) err('', `набор "${x.set}" не найден`);
+    else if (!s.system) err('', 'extend расширяет только системные наборы');
+    else {
+      const added = x.fields.filter((f) => {
+        if (defs.has(f)) return true;
+        err('fields', `поле "${f}" не найдено`);
+        return false;
+      });
+      setDefs.set(x.set, { ...s, fields: [...new Set([...s.fields, ...added])] });
+    }
+  }
   const computed = [...defs.values()].filter(isComputed);
 
   // --- sets and link targets -----------------------------------------------------------------
-  for (const s of raw.sets) {
+  for (const s of setDefs.values()) {
     for (const f of s.fields) if (!defs.has(f)) report(s.src, 'fields', `поле "${f}" не найдено`);
     for (const r of s.requires) if (!setDefs.has(r)) report(s.src, 'requires', `набор "${r}" не найден`);
   }
@@ -422,7 +447,7 @@ export function compileConfig(raw: RawConfig): CompiledConfig {
 
   const sets = new Map<string, CompiledSet>();
   const setsOfField = new Map<string, Set<string>>();
-  for (const s of raw.sets) {
+  for (const s of setDefs.values()) {
     const closure: string[] = [];
     const walk = (k: string): void => {
       if (closure.includes(k)) return;
@@ -448,7 +473,7 @@ export function compileConfig(raw: RawConfig): CompiledConfig {
     sourceKeys: depsOf(d),
   }));
 
-  return { timezone: raw.timezone, fields, sets, rules, formulaOrder, rollups, setsOfField, showTargets };
+  return { timezone: raw.timezone, phoneRegion: raw.phoneRegion, fields, sets, rules, formulaOrder, rollups, setsOfField, showTargets };
 }
 
 /** Owned link fields (keys) that belong to any of `sets`, de-duplicated and sorted by key. */

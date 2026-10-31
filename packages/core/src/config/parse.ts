@@ -1,9 +1,10 @@
 import { isMap, isSeq, LineCounter, parseDocument, type Document } from 'yaml';
 import { ConfigError, type ConfigIssue } from './errors.js';
 import {
-  DEFAULT_TIMEZONE, fileSchema, KEY_RE,
+  DEFAULT_PHONE_REGION, DEFAULT_TIMEZONE, fileSchema, KEY_RE,
   type FieldDef, type RawConfig, type RuleDef, type SetDef,
 } from './schema.js';
+import { SYSTEM_FILE } from './system.js';
 
 type Path = (string | number)[];
 
@@ -42,10 +43,14 @@ export function parseConfigFiles(files: { name: string; content: string }[]): Ra
   const fields: FieldDef[] = [];
   const sets: SetDef[] = [];
   const rules: RuleDef[] = [];
+  const extendSets: RawConfig['extendSets'] = [];
+  const extendFields: RawConfig['extendFields'] = [];
+  const extendFieldFile = new Map<string, string>();
   const fieldFile = new Map<string, string>();
   const setFile = new Map<string, string>();
   const ruleFile = new Map<string, string>();
   let timezone: { value: string; file: string } | undefined;
+  let phoneRegion: { value: string; file: string } | undefined;
 
   for (const { name: file, content } of files) {
     const lc = new LineCounter();
@@ -84,6 +89,15 @@ export function parseConfigFiles(files: { name: string; content: string }[]): Ra
       } else timezone ??= { value: tz, file };
     }
 
+    const region = data.workspace?.phone_region;
+    if (region !== undefined) {
+      if (phoneRegion && phoneRegion.value !== region) {
+        issue(['workspace', 'phone_region'], `phone_region already set to "${phoneRegion.value}" in ${phoneRegion.file}`);
+      } else phoneRegion ??= { value: region, file };
+    }
+
+    const isSystem = file === SYSTEM_FILE;
+
     for (const [key, def] of Object.entries(data.fields ?? {})) {
       const path = ['fields', key];
       if (key === 'title') {
@@ -94,13 +108,19 @@ export function parseConfigFiles(files: { name: string; content: string }[]): Ra
         issue(path, `field key "${key}" must be snake_case (${KEY_RE.source})`);
         continue;
       }
+      if (def.managed === true && !isSystem) {
+        issue([...path, 'managed'], 'managed допускается только во встроенной части');
+        continue;
+      }
       const prev = fieldFile.get(key);
       if (prev !== undefined) {
-        issue(path, `duplicate field "${key}": already defined in ${prev}`);
+        issue(path, prev === SYSTEM_FILE
+          ? `"${key}" — системное поле; его можно только расширить через extend`
+          : `duplicate field "${key}": already defined in ${prev}`);
         continue;
       }
       fieldFile.set(key, file);
-      fields.push({ key, ...def, src: { file, path: fmt(path), line: lineOf(doc, lc, path) } });
+      fields.push({ key, ...def, ...(isSystem ? { system: true } : {}), src: { file, path: fmt(path), line: lineOf(doc, lc, path) } });
     }
 
     for (const [key, def] of Object.entries(data.sets ?? {})) {
@@ -111,11 +131,29 @@ export function parseConfigFiles(files: { name: string; content: string }[]): Ra
       }
       const prev = setFile.get(key);
       if (prev !== undefined) {
-        issue(path, `duplicate set "${key}": already defined in ${prev}`);
+        issue(path, prev === SYSTEM_FILE
+          ? `"${key}" — системный набор; его можно только расширить через extend`
+          : `duplicate set "${key}": already defined in ${prev}`);
         continue;
       }
       setFile.set(key, file);
-      sets.push({ key, ...def, src: { file, path: fmt(path), line: lineOf(doc, lc, path) } });
+      sets.push({ key, ...def, system: isSystem, src: { file, path: fmt(path), line: lineOf(doc, lc, path) } });
+    }
+
+    for (const [set, def] of Object.entries(data.extend?.sets ?? {})) {
+      const path = ['extend', 'sets', set];
+      extendSets.push({ set, fields: def.fields, src: { file, path: fmt(path), line: lineOf(doc, lc, path) } });
+    }
+
+    for (const [field, def] of Object.entries(data.extend?.fields ?? {})) {
+      const path = ['extend', 'fields', field];
+      const prev = extendFieldFile.get(field);
+      if (prev !== undefined) {
+        issue(path, `extend поля "${field}" уже есть в ${prev}`);
+        continue;
+      }
+      extendFieldFile.set(field, file);
+      extendFields.push({ field, ...def, src: { file, path: fmt(path), line: lineOf(doc, lc, path) } });
     }
 
     (data.rules ?? []).forEach((def, i) => {
@@ -131,5 +169,9 @@ export function parseConfigFiles(files: { name: string; content: string }[]): Ra
   }
 
   if (issues.length > 0) throw new ConfigError(issues);
-  return { timezone: timezone?.value ?? DEFAULT_TIMEZONE, fields, sets, rules };
+  return {
+    timezone: timezone?.value ?? DEFAULT_TIMEZONE,
+    phoneRegion: phoneRegion?.value ?? DEFAULT_PHONE_REGION,
+    fields, sets, rules, extendSets, extendFields,
+  };
 }

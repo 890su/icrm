@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { ConfigError, ownedFieldsOf } from '../../src/index.js';
+import { compileConfig, ConfigError, ownedFieldsOf, parseConfigFiles, withSystem } from '../../src/index.js';
 import { compile, compileIssues, fixture } from '../helpers.js';
 
 const costYaml = (expr: string, label: string) =>
@@ -8,6 +8,10 @@ const costYaml = (expr: string, label: string) =>
 
 /** Target set for link fields in the snippets below. */
 const SET_T = 'sets: {t: {label: T, fields: []}}';
+
+/** Compiles `content` together with a built-in part that defines the system set `conv`. */
+const compileWithConv = (content: string) =>
+  compileConfig(parseConfigFiles(withSystem([{ name: 't.yaml', content }], 'sets: {conv: {label: C, fields: []}}')));
 
 describe('compileConfig', () => {
   test('formula type inferred and deps collected', () => {
@@ -256,15 +260,22 @@ sets: {t: {label: T, fields: [sub]}}`)).toContainEqual(expect.objectContaining({
     });
 
     test('owned rows cannot carry a system set', () => {
-      expect(compileIssues(`fields: {rows: {type: link, label: R, target_sets: [conv], owned: true}}
-sets: {t: {label: T, fields: [rows]}, conv: {label: C, system: true, fields: []}}`)).toContainEqual(expect.objectContaining({
+      let issues: ConfigError['issues'] = [];
+      try {
+        compileWithConv(`fields: {rows: {type: link, label: R, target_sets: [conv], owned: true}}
+sets: {t: {label: T, fields: [rows]}}`);
+      } catch (e) {
+        if (!(e instanceof ConfigError)) throw e;
+        issues = e.issues;
+      }
+      expect(issues).toContainEqual(expect.objectContaining({
         path: 'fields.rows.target_sets', message: 'строки не могут иметь системный набор "conv"',
       }));
     });
 
     test('a non-owned link may target a system set', () => {
-      expect(() => compile(`fields: {r: {type: link, label: R, target_sets: [conv]}}
-sets: {t: {label: T, fields: [r]}, conv: {label: C, system: true, fields: []}}`)).not.toThrow();
+      expect(() => compileWithConv(`fields: {r: {type: link, label: R, target_sets: [conv]}}
+sets: {t: {label: T, fields: [r]}}`)).not.toThrow();
     });
   });
 });
