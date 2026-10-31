@@ -1,4 +1,5 @@
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadConfigDir } from '@icrm/core/node';
 import { RecordService } from '@icrm/db';
@@ -379,6 +380,15 @@ describe('main', () => {
       },
     });
   }
+
+  test('main refuses the placeholder token of .env.example', () => {
+    const example = readFileSync(fileURLToPath(new URL('../../../.env.example', import.meta.url)), 'utf8');
+    const placeholder = /^ICRM_API_TOKEN=(.*)$/m.exec(example)?.[1]?.trim();
+    expect(placeholder).toBeTruthy();
+    const r = runMain({ ICRM_API_TOKEN: placeholder });
+    expect(r.status, r.stderr).toBe(1);
+    expect(r.stderr).toContain('at least 16');
+  }, 90_000);
 
   test('main exits 1 on broken config', () => {
     // The config is loaded before any connection is made, so the dummy DATABASE_URL never gets used.

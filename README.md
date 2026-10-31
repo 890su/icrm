@@ -14,11 +14,12 @@ Node 24, Docker (Docker Desktop на Windows), pnpm 9 через corepack.
 corepack enable
 pnpm i
 docker compose -f docker-compose.dev.yml up -d   # Postgres 16 на 127.0.0.1:54320
-cp .env.example .env                             # затем впишите свой ICRM_API_TOKEN
+cp .env.example .env                             # затем замените ICRM_API_TOKEN своим токеном
 pnpm --filter @icrm/server dev                   # http://127.0.0.1:3100
 ```
 
-Токен — любая строка от 16 символов; сгенерировать:
+Токен — любая строка от 16 символов. Плейсхолдер `CHANGE_ME` из `.env.example` намеренно короче:
+пока его не заменить, сервер не стартует. Сгенерировать токен:
 
 ```sh
 node -e "console.log(crypto.randomUUID())"
@@ -28,9 +29,10 @@ node -e "console.log(crypto.randomUUID())"
 конфиг из `config/`. При старте применяются миграции, создаётся рабочее пространство `default`
 и конфиг синхронизируется с БД.
 
-Проверка (токен — значение `ICRM_API_TOKEN` из `.env`):
+Проверка: сервер читает `.env` сам, а для `curl` токен нужен в переменной окружения текущей оболочки:
 
 ```sh
+export ICRM_API_TOKEN=...   # то же значение, что в .env
 curl -H "Authorization: Bearer $ICRM_API_TOKEN" http://127.0.0.1:3100/meta
 ```
 
@@ -44,6 +46,10 @@ curl -X POST http://127.0.0.1:3100/records \
 
 Остановка: `Ctrl+C`, затем `docker compose -f docker-compose.dev.yml down` (данные остаются в томе
 `pgdata-dev`; `down -v` удалит и их).
+
+`POSTGRES_INITDB_ARGS` (кодировка и локаль) применяются только при создании нового тома. Чтобы применить
+их к уже созданной базе, пересоздайте том — данные разработки при этом пропадут:
+`docker compose -f docker-compose.dev.yml down -v`, затем снова `up -d`.
 
 ## Переменные окружения
 
