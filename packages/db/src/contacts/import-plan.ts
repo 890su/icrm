@@ -25,6 +25,9 @@ export function importableField(cfg: CompiledConfig, set: 'contact' | 'organizat
   return f.managed === true || !CELL_TYPES.has(f.type) ? null : f;
 }
 
+/** An organization matched by name: its id (or virtual ref), title and NIP. */
+interface NamedOrganization { id: string; title: string; nip: string | null }
+
 /** A normalised address of a row. */
 export interface PlannedAddress { channel: Channel; normalized: string; display: string }
 
@@ -68,8 +71,8 @@ export class Overlay {
   readonly addresses = new Map<string, string>();
   /** NIP → organization ref. */
   readonly nips = new Map<string, string>();
-  /** Normalised name → organization ref. */
-  readonly names = new Map<string, string>();
+  /** Normalised name → the organizations created under it, with their NIPs. */
+  readonly names = new Map<string, NamedOrganization[]>();
   /** `contactRef organizationRef` of the memberships created by earlier rows. */
   readonly pairs = new Set<string>();
 
@@ -87,7 +90,9 @@ export class Overlay {
     const org = plan.organization;
     if (org?.action === 'create') {
       if (org.nip !== null) this.nips.set(org.nip, org.ref);
-      if (org.nameNorm !== '') this.names.set(org.nameNorm, org.ref);
+      if (org.nameNorm !== '') {
+        this.names.set(org.nameNorm, [...(this.names.get(org.nameNorm) ?? []), { id: org.ref, title: org.title, nip: org.nip }]);
+      }
     }
     if (org !== null && plan.membership?.action === 'create') this.pairs.add(pairKey(contactRef, org.ref));
   }
@@ -159,16 +164,26 @@ export async function planRow(tx: Db, deps: PlanDeps, row: ImportRow, overlay: O
         || (!isVirtual(contact.ref) && await activeMembershipExists(tx, deps, contact.ref, organization.ref)));
     membership = exists ? { action: 'exists' } : {
       action: 'create',
-      role: rolesOf(row.membership?.role ?? []),
+      role: rolesOf(deps.cfg, row.membership?.role ?? [], row.columns, warnings),
       position: trimmed(row.membership?.position),
     };
   }
   return { ...base, action, contact, addresses: fresh, organization, membership };
 }
 
-/** The roles of a row: cells split by "," and ";", trimmed, without empties and repeats. */
-const rolesOf = (cells: string[]): string[] =>
-  [...new Set(cells.flatMap((r) => r.split(/[,;]/)).map((r) => r.trim()).filter((r) => r !== ''))];
+/**
+ * The roles of a row: cells split by "," and ";", trimmed, without empties and repeats. A role outside the
+ * options of `role` is a warning and the roles are skipped, as for any enum field.
+ */
+function rolesOf(cfg: CompiledConfig, cells: string[], columns: Record<string, string> | undefined, warnings: string[]): string[] {
+  const roles = [...new Set(cells.flatMap((r) => r.split(/[,;]/)).map((r) => r.trim()).filter((r) => r !== ''))];
+  const field = cfg.fields.get('role');
+  const message = field === undefined || roles.length === 0 ? null : notAnOption(field, roles);
+  if (message === null) return roles;
+  const column = columns?.['membership.role'];
+  warnings.push(`${column !== undefined ? `Колонка «${column}»` : `Поле «${field!.label}»`}: ${message}; значение пропущено`);
+  return [];
+}
 
 /** The row's addresses, normalised and without repeats; unknown channels and unreadable addresses are warnings. */
 function parseAddresses(cfg: CompiledConfig, row: ImportRow, warnings: string[]): PlannedAddress[] {
@@ -216,6 +231,17 @@ async function holderOf(tx: Db, workspaceId: string, a: PlannedAddress, overlay:
   return skip(`принадлежит записи «${owner.title}»`);
 }
 
+/**
+ * Why a coerced enum value is not one of the field's options (any part of a multiple one), or null. Rules
+ * may narrow the options further; that is left to the save.
+ */
+function notAnOption(f: CompiledField, value: Value): string | null {
+  if (f.type !== 'enum' || f.options === undefined || value === null) return null;
+  const values = Array.isArray(value) ? value : [value];
+  const bad = values.find((v) => typeof v !== 'string' || !f.options!.includes(v));
+  return bad === undefined ? null : `«${String(bad)}» — нет среди вариантов (${f.options.join(', ')})`;
+}
+
 /** The cells of `data` coerced to their fields; a cell that does not fit (or no importable field) is a warning. */
 function coerceAll(
   cfg: CompiledConfig, set: 'contact' | 'organization', data: Record<string, string>,
@@ -231,11 +257,12 @@ function coerceAll(
       continue;
     }
     const c = coerceCell(f, raw);
-    if (!c.ok) {
-      warnings.push(`${where}: ${c.message}; значение пропущено`);
+    const message = c.ok ? notAnOption(f, c.value) : c.message;
+    if (message !== null) {
+      warnings.push(`${where}: ${message}; значение пропущено`);
       continue;
     }
-    if (c.value !== null) out[key] = c.value;
+    if (c.ok && c.value !== null) out[key] = c.value;
   }
   return out;
 }
@@ -274,11 +301,18 @@ async function organizationOf(
 
   const title = trimmed(o.title);
   const nameNorm = title === null ? '' : normalizeCompanyName(title);
-  const virtual = nameNorm === '' ? undefined : overlay.names.get(nameNorm);
-  if (virtual !== undefined) return { action: 'found', ref: virtual };
-  const byName = await organizationsByName(tx, deps.workspaceId, nameNorm, 2);
-  if (byName.length > 1) warnings.push(`Название «${title}» есть у нескольких организаций, выбрана «${byName[0]!.title}»`);
-  if (byName[0] !== undefined) return { action: 'found', ref: byName[0].id };
+  // By name: only an organization without a NIP or with the row's one; another NIP is another firm.
+  const named = nameNorm === '' ? []
+    : [...await organizationsByName(tx, deps.workspaceId, nameNorm), ...(overlay.names.get(nameNorm) ?? [])];
+  const byName = nip === null ? named : named.filter((n) => n.nip === null || n.nip === nip);
+  const pick = byName[0];
+  if (pick !== undefined) {
+    if (byName.length > 1) warnings.push(`Название «${title}» есть у нескольких организаций, выбрана «${pick.title}»`);
+    if (nip !== null && pick.nip === null) {
+      warnings.push(`NIP «${nip}» не записан: организация «${pick.title}» найдена по названию, импорт не меняет организации`);
+    }
+    return { action: 'found', ref: pick.id };
+  }
 
   if (title === null) {
     warnings.push('Нет названия организации и NIP не найден — организация пропущена');

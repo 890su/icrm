@@ -19,7 +19,7 @@ export interface ImportRow {
   identities: { channel: string; address: string }[];
   organization: { title: string | null; nip: string | null; data: Record<string, string> } | null;
   membership: { role: string[]; position: string | null } | null;
-  /** The file's column of each `contact.<f>` / `organization.<f>` target, so that warnings can name it. */
+  /** The file's column of each `contact.<f>` / `organization.<f>` / `membership.role` target, so that warnings can name it. */
   columns?: Record<string, string>;
 }
 
@@ -181,7 +181,10 @@ export class ImportService {
       else if (set === 'identity') identities.push({ channel: key, address: value });
       else if (target === 'organization.title') org.title = value;
       else if (target === 'organization.nip') org.nip = value;
-      else if (target === 'membership.role') role.push(...value.split(/[,;]/).map((s) => s.trim()).filter((s) => s !== ''));
+      else if (target === 'membership.role') {
+        role.push(...value.split(/[,;]/).map((s) => s.trim()).filter((s) => s !== ''));
+        used[target] = used[target] === undefined ? header : `${used[target]}», «${header}`;
+      }
       else if (target === 'membership.position') position = value;
       else {
         (set === 'contact' ? contactData : org.data)[key] = cell;

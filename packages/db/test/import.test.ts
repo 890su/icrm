@@ -223,6 +223,39 @@ describe('commit', () => {
     expect((await svc.records.get(alfa.id))?.title).toBe('Alfa Sp. z o.o.');
   });
 
+  test('a name match with another NIP is another firm; one without a NIP is found and keeps it empty', async () => {
+    const delta = await create('Delta Sp. z o.o.', ['organization'], { nip: '1111427877' });
+    const epsilon = await create('Epsilon', ['organization']);
+    const [other, noNip] = await imp.commit([
+      row({ title: 'Nip 1', org: 'Delta', nip: '2222301418' }),
+      row({ title: 'Nip 2', org: 'EPSILON s.c.', nip: '2222380607' }),
+    ], userId);
+    expect(other!.organization).toEqual({ action: 'create', id: expect.any(String) });
+    expect(other!.organization!.id).not.toBe(delta.id);
+    const created = await svc.records.get(other!.organization!.id!);
+    expect([created?.title, created?.data.nip]).toEqual(['Delta', '2222301418']);
+    expect(other!.warnings).toEqual([]);
+    expect(noNip!.organization).toEqual({ action: 'found', id: epsilon.id });
+    expect(noNip!.warnings).toEqual([expect.stringContaining('NIP «2222380607» не записан')]);
+    expect((await svc.records.get(epsilon.id))?.data.nip ?? null).toBeNull();
+  });
+
+  test('an enum value outside the options is a warning in preview and commit, the field stays empty', async () => {
+    const mapped = imp.rowsFromTable(table(['Kto', 'Firma', 'Typ', 'Rola'], [['Halina', 'Firma Enum', 'hurtownia', 'szef']]),
+      { Kto: 'contact.title', Firma: 'organization.title', Typ: 'organization.org_kind', Rola: 'membership.role' });
+    if (!mapped.ok) throw new Error('mapping failed');
+    const expected = expect.objectContaining({ action: 'create', organization: expect.objectContaining({ action: 'create' }),
+      membership: 'create', warnings: [expect.stringContaining('«Typ»'), expect.stringContaining('«Rola»')] });
+    expect(await imp.preview(mapped.rows)).toEqual([expected]);
+    const [done] = await imp.commit(mapped.rows, userId);
+    expect(done).toEqual(expected);
+    expect(done!.errors).toBeUndefined();
+    expect(done!.warnings[0]).toContain('«hurtownia»');
+    expect((await svc.records.get(done!.organization!.id!))?.data.org_kind ?? null).toBeNull();
+    const person = await svc.records.get(done!.contactId!);
+    expect(person?.memberships).toEqual([expect.objectContaining({ role: [] })]);
+  });
+
   test('an address owned by an organization is not a person match', async () => {
     const org = await create('Firma Biuro', ['organization']);
     await address(org.id, 'email', 'biuro@firma-biuro.pl');
@@ -247,11 +280,11 @@ describe('commit', () => {
   test('a failing row does not stop the others', async () => {
     const res = await imp.commit([
       row({ title: 'R1', email: 'r1@x.pl' }),
-      row({ title: 'R2', email: 'r2@x.pl', org: 'Gamma', orgData: { org_kind: 'нет такого' } }),
+      row({ title: 'R2', email: 'r2@x.pl', org: 'Gamma', orgData: { email_domains: 'gmail.com' } }),
       row({ title: 'R3' }),
     ], userId);
     expect(res.map((r) => r.action)).toEqual(['create', 'error', 'create']);
-    expect(res[1]!.errors).toEqual([expect.objectContaining({ field: 'org_kind' })]);
+    expect(res[1]!.errors).toEqual([expect.objectContaining({ code: 'public_domain', field: 'email_domains' })]);
     const r2 = await db.selectFrom('records').select('id').where('title', 'in', ['R2', 'Gamma']).execute();
     expect(r2).toEqual([]);
     expect((await svc.contacts.resolveAddress('email', 'r2@x.pl'))).toEqual(expect.objectContaining({ identity: null }));

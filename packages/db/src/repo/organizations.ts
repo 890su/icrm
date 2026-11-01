@@ -26,14 +26,14 @@ export async function organizationByNip(tx: Db, workspaceId: string, nip: string
 
 /**
  * Live records with the `organization` set whose normalised name in `record_search` equals `nameNorm`
- * (not empty: an empty name is no key), oldest first; at most `limit`.
+ * (not empty: an empty name is no key), with their NIPs (null when none), oldest first; at most `limit`.
  */
 export async function organizationsByName(
-  tx: Db, workspaceId: string, nameNorm: string, limit: number,
-): Promise<{ id: string; title: string }[]> {
+  tx: Db, workspaceId: string, nameNorm: string, limit = 50,
+): Promise<{ id: string; title: string; nip: string | null }[]> {
   if (nameNorm === '') return [];
   return tx.selectFrom('record_search as rs').innerJoin('records as r', 'r.id', 'rs.record_id')
-    .select(['r.id', 'r.title'])
+    .select(['r.id', 'r.title', sql<string | null>`nullif(r.data->>'nip', '')`.as('nip')])
     .where('rs.workspace_id', '=', workspaceId).where('rs.kind', '=', 'organization').where('rs.name_norm', '=', nameNorm)
     .where('r.workspace_id', '=', workspaceId).where('r.archived_at', 'is', null)
     .where((eb) => eb.exists(eb.selectFrom('record_sets as s').select('s.record_id')
