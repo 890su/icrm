@@ -1,5 +1,5 @@
 import { emailDomainOf, PUBLIC_EMAIL_DOMAINS, type CompiledConfig, type RecordError } from '@icrm/core';
-import { sql, type Kysely } from 'kysely';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import { loadRecords, type StoredRecord } from '../repo/records.js';
 import {
   SEARCH_KINDS, searchHits, searchKeys, searchRowsOf, upsertSearchRows, type SearchHit,
@@ -194,12 +194,12 @@ export class DuplicateService {
     return { ok: true };
   }
 
-  private candidatesOfKind(tx: Db, kind: DuplicateKind, rec: StoredRecord): Promise<DuplicateCandidate[]> {
+  private candidatesOfKind(tx: Transaction<DB>, kind: DuplicateKind, rec: StoredRecord): Promise<DuplicateCandidate[]> {
     return kind === 'contact' ? this.contactCandidates(tx, rec) : this.organizationCandidates(tx, rec);
   }
 
   /** The same name and, for a similar one, a shared organization or email domain. */
-  private async contactCandidates(tx: Db, rec: StoredRecord): Promise<DuplicateCandidate[]> {
+  private async contactCandidates(tx: Transaction<DB>, rec: StoredRecord): Promise<DuplicateCandidate[]> {
     const { nameNorm } = searchKeys('contact', rec);
     if (nameNorm === '') return [];
     const hits = await searchHits(tx, {
@@ -226,7 +226,7 @@ export class DuplicateService {
   }
 
   /** A similar name, a shared `email_domains` entry, or the same address. */
-  private async organizationCandidates(tx: Db, rec: StoredRecord): Promise<DuplicateCandidate[]> {
+  private async organizationCandidates(tx: Transaction<DB>, rec: StoredRecord): Promise<DuplicateCandidate[]> {
     const { nameNorm, addressNorm } = searchKeys('organization', rec);
     const myDomains = domainsOfOrganization(rec.data);
     const hits = await searchHits(tx, {

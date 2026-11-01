@@ -1,7 +1,7 @@
 import { normalizeCompanyName, normalizePersonName, normalizeStreetAddress } from '@icrm/core';
-import { sql } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 import type { DuplicateKind } from '../contacts/duplicates.js';
-import type { RecordSearchTable } from '../schema.js';
+import type { DB, RecordSearchTable } from '../schema.js';
 import type { StoredRecord } from './records.js';
 import type { Db } from './types.js';
 
@@ -63,10 +63,10 @@ export interface SearchHit {
  * Live records of `kind` (the set still enabled, not archived) whose index row matches `key` by name
  * (equal, or trigram `%` at `threshold`) or, when `byAddress`, by an equal address, or whose
  * `email_domains` hold one of `domains`; never `selfId`, never a pair in `duplicate_dismissals`. Runs `pg_trgm.similarity_threshold`
- * for the transaction, so the caller passes a transaction.
+ * for the transaction, so it takes one: outside a transaction the setting would not reach the search query.
  */
 export async function searchHits(
-  tx: Db, o: {
+  tx: Transaction<DB>, o: {
     workspaceId: string; kind: DuplicateKind; selfId: string; nameNorm: string; addressNorm: string | null;
     threshold: number; byAddress: boolean; domains?: readonly string[];
   },

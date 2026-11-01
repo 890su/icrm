@@ -30,9 +30,10 @@ async function organizationErrors(
         errors.push(recordError('nip_invalid', 'Неверный NIP', { field: 'nip' }));
       } else {
         input.nip = normalized;
+        // `data ? 'nip'` with `archived_at is null` lets the partial index `records_live_nip` serve the check.
         let q = tx.selectFrom('records').select(['id', 'title'])
           .where('workspace_id', '=', workspaceId).where('archived_at', 'is', null)
-          .where(sql<string>`data->>'nip'`, '=', normalized);
+          .where(sql<boolean>`data ? 'nip'`).where(sql<string>`data->>'nip'`, '=', normalized);
         if (selfId !== null) q = q.where('id', '<>', selfId);
         const holder = await q.limit(1).executeTakeFirst();
         if (holder !== undefined) {
