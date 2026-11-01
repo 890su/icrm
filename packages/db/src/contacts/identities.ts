@@ -14,6 +14,13 @@ import { withRetry } from '../service/retry.js';
 
 export type { IdentityView } from '../repo/identities.js';
 
+/** A new address of `ownerId`. */
+export interface AddInput {
+  ownerId: string; channel: string; address: string; label?: string | null; verified?: boolean; userId: string;
+}
+
+type Parsed = { ok: true; channel: Channel; normalized: string; display: string };
+
 export type IdentityResult = { ok: true; identity: IdentityView } | { ok: false; errors: RecordError[] };
 
 /** The sets whose records may own addresses. */
@@ -56,30 +63,26 @@ export class IdentityService {
   }
 
   /** Adds an address to `ownerId`. The owner is locked; a taken address names its current owner. */
-  async add(i: {
-    ownerId: string; channel: string; address: string; label?: string | null; verified?: boolean; userId: string;
-  }): Promise<IdentityResult> {
-    const channel = identityChannel(i.channel);
-    if (channel === null) return { ok: false, errors: [recordError('invalid_address', `Неизвестный канал «${i.channel}»`)] };
-    const n = normalizeAddress(channel, i.address, this.cfg.phoneRegion);
-    if (!n.ok) return { ok: false, errors: [recordError('invalid_address', n.message)] };
-
-    const res = await this.run(async (tx) => {
-      await this.lockOwners(tx, [i.ownerId]);
-      const holder = await liveByAddress(tx, this.workspaceId, channel, n.normalized);
-      if (holder !== undefined) throw new SaveFailed([taken(holder.ownerId, holder.ownerTitle)]);
-      const identity = await insertIdentity(tx, {
-        id: uuidv7(), workspaceId: this.workspaceId, ownerId: i.ownerId, channel, address: n.normalized,
-        display: n.display, label: i.label ?? null, verified: i.verified ?? false,
-      });
-      await this.log(tx, i.userId, 'user', [{ recordId: i.ownerId, old: null, new: logged(identity) }]);
-      return identity;
-    });
+  async add(i: AddInput): Promise<IdentityResult> {
+    const parsed = this.parse(i.channel, i.address);
+    if (!parsed.ok) return { ok: false, errors: parsed.errors };
+    const res = await this.run((tx) => this.insertRow(tx, parsed, i));
     if (res.ok) return { ok: true, identity: res.value };
     if (!res.conflict) return { ok: false, errors: res.errors };
     // The other add won the race and committed: its owner is the live holder now.
-    const holder = await liveByAddress(this.db, this.workspaceId, channel, n.normalized);
+    const holder = await liveByAddress(this.db, this.workspaceId, parsed.channel, parsed.normalized);
     return { ok: false, errors: [holder === undefined ? res.errors[0]! : taken(holder.ownerId, holder.ownerTitle)] };
+  }
+
+  /**
+   * Inside the caller's transaction: adds an address like `add` (owner locked first, logged); failures
+   * (`invalid_address`, `identity_taken`, `invalid_owner`) are thrown as `SaveFailed`. A concurrent add of the
+   * same address surfaces as the unique violation, which the caller's save turns into `identity_taken`.
+   */
+  async addIn(tx: Db, i: AddInput): Promise<IdentityView> {
+    const parsed = this.parse(i.channel, i.address);
+    if (!parsed.ok) throw new SaveFailed(parsed.errors);
+    return this.insertRow(tx, parsed, i);
   }
 
   /** Changes the label, the verified flag or the displayed spelling (which must still be the same address). */
@@ -147,6 +150,27 @@ export class IdentityService {
     if (live.length === 0) return;
     await archiveIdentities(tx, live.map((l) => l.id), this.now());
     await this.log(tx, userId, source, live.map((l) => ({ recordId: l.ownerId, old: logged(l), new: null })));
+  }
+
+  /** The channel and normalised address of an input, or `invalid_address`. */
+  private parse(channel: string, address: string): Parsed | { ok: false; errors: RecordError[] } {
+    const ch = identityChannel(channel);
+    if (ch === null) return { ok: false, errors: [recordError('invalid_address', `Неизвестный канал «${channel}»`)] };
+    const n = normalizeAddress(ch, address, this.cfg.phoneRegion);
+    if (!n.ok) return { ok: false, errors: [recordError('invalid_address', n.message)] };
+    return { ok: true, channel: ch, normalized: n.normalized, display: n.display };
+  }
+
+  private async insertRow(tx: Db, p: Parsed, i: AddInput): Promise<IdentityView> {
+    await this.lockOwners(tx, [i.ownerId]);
+    const holder = await liveByAddress(tx, this.workspaceId, p.channel, p.normalized);
+    if (holder !== undefined) throw new SaveFailed([taken(holder.ownerId, holder.ownerTitle)]);
+    const identity = await insertIdentity(tx, {
+      id: uuidv7(), workspaceId: this.workspaceId, ownerId: i.ownerId, channel: p.channel, address: p.normalized,
+      display: p.display, label: i.label ?? null, verified: i.verified ?? false,
+    });
+    await this.log(tx, i.userId, 'user', [{ recordId: i.ownerId, old: null, new: logged(identity) }]);
+    return identity;
   }
 
   private async moveRow(tx: Db, id: string, toOwnerId: string, userId: string): Promise<IdentityView> {

@@ -4,6 +4,7 @@ import { contactBehaviors } from './contacts/behaviors.js';
 import { DuplicateService } from './contacts/duplicates.js';
 import { ContactService } from './contacts/contact-service.js';
 import { IdentityService } from './contacts/identities.js';
+import { ImportService } from './contacts/import.js';
 import type { MergeStep } from './contacts/merge.js';
 import type { DB } from './schema.js';
 import { RecordService } from './service/record-service.js';
@@ -14,6 +15,7 @@ export interface Services {
   identities: IdentityService;
   contacts: ContactService;
   duplicates: DuplicateService;
+  imports: ImportService;
 }
 
 /** `mergeSteps` — the steps of later sub-projects that every merge of duplicates runs (spec 2a §6.2 p.8). */
@@ -26,5 +28,6 @@ export function createServices(o: {
   const records = new RecordService({ ...o, behaviors });
   const contacts = new ContactService({ ...o, records, identities });
   const duplicates = new DuplicateService(o);
-  return { records, identities, contacts, duplicates };
+  const imports = new ImportService({ ...o, records, identities });
+  return { records, identities, contacts, duplicates, imports };
 }

@@ -15,7 +15,7 @@ export {
 export type { BehaviorContext, SetBehavior } from './service/behaviors.js';
 export { UNIQUE_ERRORS, uniqueViolation } from './service/errors.js';
 export {
-  IdentityService, OWNER_SETS, type IdentityResult, type IdentityView,
+  IdentityService, OWNER_SETS, type AddInput, type IdentityResult, type IdentityView,
 } from './contacts/identities.js';
 export { ContactService, type RecordRef, type ResolveResult } from './contacts/contact-service.js';
 export type { RegistryEntry } from './contacts/registry.js';
@@ -43,4 +43,7 @@ export {
 export {
   queryRecords, QueryError, type QueryErrorCode, type QueryInput, type QueryOutput,
 } from './query.js';
-export type { ImportRow, ImportTable } from './contacts/import.js';
+export {
+  ImportService, type ImportMapping, type ImportRow, type ImportTable, type ImportTarget, type MappingResult, type RowAction,
+  type RowResult,
+} from './contacts/import.js';

@@ -183,3 +183,19 @@ test('the live address and NIP unique indexes exist', async () => {
   const r = await sql<{ indexname: string }>`select indexname from pg_indexes where tablename in ('identities', 'records')`.execute(db);
   expect(r.rows.map((x) => x.indexname)).toEqual(expect.arrayContaining(['identities_live_address', 'identities_owner', 'records_live_nip']));
 });
+
+test('addIn adds inside the caller transaction and throws SaveFailed on refusal', async () => {
+  const owner = await contact('In'); const other = await contact('Other');
+  const added = await svc.records.transaction(userId, async (ops) =>
+    ids.addIn(ops.tx, { ownerId: owner.id, channel: 'email', address: ' In@Firma.pl ', userId }));
+  expect(added).toMatchObject({ ok: true, value: { ownerId: owner.id, address: 'in@firma.pl', display: 'In@Firma.pl' } });
+  expect(await identityLog(owner.id)).toHaveLength(1);
+  const refused = async (i: { ownerId: string; channel: string; address: string }): Promise<unknown> =>
+    svc.records.transaction(userId, async (ops) => ids.addIn(ops.tx, { ...i, userId }));
+  expect(await refused({ ownerId: other.id, channel: 'email', address: 'in@firma.pl' })).toEqual({ ok: false,
+    errors: [expect.objectContaining({ code: 'identity_taken', ownerId: owner.id })] });
+  expect(await refused({ ownerId: other.id, channel: 'phone', address: '12' })).toEqual({ ok: false,
+    errors: [expect.objectContaining({ code: 'invalid_address' })] });
+  expect(await refused({ ownerId: MISSING, channel: 'email', address: 'x@firma.pl' })).toEqual({ ok: false,
+    errors: [expect.objectContaining({ code: 'invalid_owner' })] });
+});
