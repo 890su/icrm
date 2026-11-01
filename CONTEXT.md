@@ -42,8 +42,9 @@ TypeScript monorepo (pnpm workspaces): `packages/core` (чистая домен�
 системные наборы `contact`/`organization`/`membership` встроены в `@icrm/core` (расширяются
 секцией `extend`), адреса каналов, сопоставление, передача дел, слияние дублей
 (спецификация `docs/superpowers/specs/2026-10-31-contacts-organizations-design.md`).
-Запуск и переменные окружения — `README.md`. Дальше: подпроект 2b (дубли, NIP, импорт),
-затем 3 «Разговоры».
+Подпроект 2b «Контакты и организации: добавки» реализован (ветка `feat/contacts-extras`):
+подсказка дублей, заполнение по NIP из белого списка VAT, импорт vCard / CSV / XLSX.
+Запуск и переменные окружения — `README.md`. Дальше: подпроект 3 «Разговоры».
 Архитектурная спецификация: `docs/superpowers/specs/2026-10-30-icrm-architecture-design.md`.
 
 ## Sub-projects
