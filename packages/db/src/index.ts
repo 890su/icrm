@@ -18,6 +18,7 @@ export {
   IdentityService, OWNER_SETS, type IdentityResult, type IdentityView,
 } from './contacts/identities.js';
 export { ContactService, type RecordRef, type ResolveResult } from './contacts/contact-service.js';
+export type { RegistryEntry } from './contacts/registry.js';
 export type {
   EndMembershipInput, Handover, HandoverLink, HandoverResult, IdentityTarget, LinkTarget,
 } from './contacts/handover.js';

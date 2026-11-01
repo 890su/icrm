@@ -10,6 +10,11 @@ export const SYSTEM_CONFIG = `fields:
   nip: {type: text, label: NIP}
   address: {type: text, label: Адрес, multiline: true}
   email_domains: {type: text, label: Почтовые домены, multiple: true}
+  regon: {type: text, label: REGON}
+  krs: {type: text, label: KRS}
+  vat_status: {type: enum, label: Статус VAT, options: [czynny, zwolniony, niezarejestrowany]}
+  bank_accounts: {type: text, label: Банковские счета, multiple: true}
+  registry_checked_at: {type: datetime, label: Проверено в реестре, managed: true}
   contact: {type: link, label: Контакт, target_sets: [contact], cardinality: one, inverse_label: Участия}
   organization: {type: link, label: Организация, target_sets: [organization], cardinality: one, inverse_label: Участники}
   role: {type: enum, label: Роль, options: [ЛПР, бухгалтер, техник, другое], multiple: true}
@@ -20,7 +25,7 @@ export const SYSTEM_CONFIG = `fields:
   is_active: {type: formula, label: Действует, expr: 'IS_EMPTY({active_to}) OR {active_to} >= TODAY()'}
 sets:
   contact: {label: Контакт, fields: [notes, needs_review, merged_into]}
-  organization: {label: Организация, fields: [org_kind, nip, address, email_domains, merged_into]}
+  organization: {label: Организация, fields: [org_kind, nip, address, email_domains, merged_into, regon, krs, vat_status, bank_accounts, registry_checked_at]}
   membership: {label: Участие, fields: [contact, organization, role, position, active_from, active_to, is_primary, is_active]}
 rules:
   - id: membership_links_required

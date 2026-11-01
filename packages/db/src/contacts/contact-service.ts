@@ -13,6 +13,7 @@ import {
 import type { IdentityService, IdentityView } from './identities.js';
 import { isActiveOn, membershipsOf } from './memberships.js';
 import { merge, mergePreview, type MergeChoice, type MergeDeps, type MergePreview, type MergeStep } from './merge.js';
+import { applyRegistryEntry, type RegistryEntry } from './registry.js';
 
 export interface RecordRef { id: string; title: string }
 
@@ -136,6 +137,14 @@ export class ContactService {
   /** Merges duplicate `sourceId` into `targetId` (spec 2a §6.2); the record of the result is `targetId`'s view. */
   merge(i: { sourceId: string; targetId: string; values?: MergeChoice; userId: string }): Promise<SaveResult> {
     return merge(this.deps(), i);
+  }
+
+  /**
+   * Fills the organization `id` from a registry entry (spec 2b §7.2): title and address when empty, the
+   * registry's own fields always, `registry_checked_at` = now; one transaction.
+   */
+  applyRegistryEntry(i: { id: string; entry: RegistryEntry; userId: string }): Promise<SaveResult> {
+    return applyRegistryEntry({ records: this.records, workspaceId: this.workspaceId, now: this.now }, i);
   }
 
   private deps(): MergeDeps {

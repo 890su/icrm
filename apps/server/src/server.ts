@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import type { Kysely } from 'kysely';
 import { registerAuth } from './auth.js';
 import { registerErrorHandling } from './errors.js';
+import { MfWhiteList, type NipRegistry } from './registry/nip-registry.js';
 import { registerDuplicateRoutes } from './routes/duplicates.js';
 import { registerIdentityRoutes } from './routes/identities.js';
 import { registerMembershipRoutes } from './routes/memberships.js';
@@ -11,6 +12,7 @@ import { registerMergeRoutes } from './routes/merge.js';
 import { registerMetaRoutes } from './routes/meta.js';
 import { registerQueryRoutes } from './routes/query.js';
 import { registerRecordRoutes } from './routes/records.js';
+import { registerRegistryRoutes } from './routes/registry.js';
 
 export interface ServerOptions {
   db: Kysely<DB>;
@@ -20,6 +22,8 @@ export interface ServerOptions {
   systemUserId: string;
   apiToken: string;
   now?: () => Date;
+  /** Source of taxpayer data by NIP (default: the VAT white list of the Ministry of Finance). */
+  nipRegistry?: NipRegistry;
   logger?: FastifyServerOptions['logger'];
 }
 
@@ -49,6 +53,10 @@ export function buildServer(o: ServerOptions): FastifyInstance {
   registerIdentityRoutes(app, { identities: services.identities, contacts: services.contacts, systemUserId: o.systemUserId });
   registerMembershipRoutes(app, { contacts: services.contacts, systemUserId: o.systemUserId });
   registerMergeRoutes(app, { contacts: services.contacts, systemUserId: o.systemUserId });
+  registerRegistryRoutes(app, {
+    contacts: services.contacts, records: services.records, registry: o.nipRegistry ?? new MfWhiteList(), cfg: o.cfg, now,
+    systemUserId: o.systemUserId,
+  });
   registerQueryRoutes(app, { db: o.db, cfg: o.cfg, workspaceId: o.workspaceId, now });
   return app;
 }

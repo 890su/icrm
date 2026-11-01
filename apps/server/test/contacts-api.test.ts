@@ -1,9 +1,10 @@
 import { fileURLToPath } from 'node:url';
 import { loadConfigDir } from '@icrm/core/node';
-import { DuplicateService } from '@icrm/db';
+import { DuplicateService, type RegistryEntry } from '@icrm/db';
 import { freshDb } from '@icrm/db/testing';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
+import { RegistryUnavailable, type NipRegistry } from '../src/registry/nip-registry.js';
 import { buildServer } from '../src/server.js';
 
 const TOKEN = 'test-token-0123456789';
@@ -11,13 +12,26 @@ const fixture = (...p: string[]): string => fileURLToPath(new URL(['fixtures', .
 const MISSING = '0198a000-0000-7000-8000-000000000000';
 
 let app: FastifyInstance;
+/** The VAT white list stand-in: tests set `registryAnswer` and read the requests it got. */
+let registryAnswer: () => Promise<RegistryEntry | null> = async () => null;
+const registryCalls: { nip: string; date: string }[] = [];
+const fakeRegistry: NipRegistry = {
+  lookup: (nip, date) => {
+    registryCalls.push({ nip, date });
+    return registryAnswer();
+  },
+};
+const ENTRY: RegistryEntry = {
+  nip: '5260250274', name: 'FIRMA X SP. Z O.O.', address: 'DŁUGA 5, 00-001 WARSZAWA', regon: '012345678', krs: '0000123456',
+  vatStatus: 'czynny', bankAccounts: ['12345678901234567890123456'],
+};
 
 beforeAll(async () => {
   const fresh = await freshDb();
   const cfg = await loadConfigDir(fixture('contacts'));
   app = buildServer({
     db: fresh.db, cfg, workspaceId: fresh.workspaceId, systemUserId: fresh.userId, apiToken: TOKEN,
-    now: () => new Date('2026-10-31T10:00:00Z'),
+    now: () => new Date('2026-10-31T10:00:00Z'), nipRegistry: fakeRegistry,
   });
   await app.ready();
 });
@@ -350,5 +364,81 @@ describe('duplicates', () => {
     expect((await call('POST', '/duplicates/dismiss', { a: a.id })).statusCode).toBe(400);
     expect((await call('POST', '/duplicates/dismiss', { a: a.id, b: b.id, extra: 1 })).statusCode).toBe(400);
     expect((await call('POST', '/duplicates/dismiss', { a: 'x', b: b.id })).statusCode).toBe(400);
+  });
+});
+
+describe('NIP registry', () => {
+  test('GET /registry/nip: 200, 404 nip_not_found, 422 nip_invalid, 502 registry_unavailable', async () => {
+    registryCalls.length = 0;
+    registryAnswer = async () => ENTRY;
+    const ok = await call('GET', '/registry/nip/526-025-02-74');
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toEqual(ENTRY);
+    expect(registryCalls).toEqual([{ nip: '5260250274', date: '2026-10-31' }]);
+
+    registryAnswer = async () => null;
+    const none = await call('GET', '/registry/nip/5260250274');
+    expect(none.statusCode).toBe(404);
+    expect(none.json().errors[0]).toMatchObject({ code: 'nip_not_found' });
+
+    registryCalls.length = 0;
+    const bad = await call('GET', '/registry/nip/1234567890');
+    expect(bad.statusCode).toBe(422);
+    expect(bad.json().errors[0]).toMatchObject({ code: 'nip_invalid' });
+    expect(registryCalls).toEqual([]);
+
+    registryAnswer = async () => { throw new RegistryUnavailable('down'); };
+    const down = await call('GET', '/registry/nip/5260250274');
+    expect(down.statusCode).toBe(502);
+    expect(down.json().errors[0]).toMatchObject({ code: 'registry_unavailable' });
+    expect((await app.inject({ method: 'GET', url: '/registry/nip/5260250274' })).statusCode).toBe(401);
+  });
+
+  test('POST /records/:id/registry-refresh fills the organization from the registry', async () => {
+    registryCalls.length = 0;
+    registryAnswer = async () => ENTRY;
+    const org = (await call('POST', '/records', { title: '', sets: ['organization'], data: { nip: '774-000-14-54' } })).json();
+    const r = await call('POST', `/records/${org.id}/registry-refresh`);
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({
+      id: org.id, title: 'FIRMA X SP. Z O.O.', version: org.version + 1,
+      data: { nip: '7740001454', address: 'DŁUGA 5, 00-001 WARSZAWA', regon: '012345678', krs: '0000123456', vat_status: 'czynny',
+        bank_accounts: ['12345678901234567890123456'], registry_checked_at: '2026-10-31T10:00:00.000Z' } });
+    expect(registryCalls).toEqual([{ nip: '7740001454', date: '2026-10-31' }]);
+    expect((await call('GET', `/records/${org.id}`)).json().data.vat_status).toBe('czynny');
+  });
+
+  test('registry down → 502 and the organization is unchanged; not found in registry → 404', async () => {
+    const org = (await call('POST', '/records', { title: 'Firma R', sets: ['organization'], data: { nip: '5252344078' } })).json();
+    registryAnswer = async () => { throw new RegistryUnavailable('down'); };
+    const down = await call('POST', `/records/${org.id}/registry-refresh`);
+    expect(down.statusCode).toBe(502);
+    expect(down.json().errors[0].code).toBe('registry_unavailable');
+    const after = (await call('GET', `/records/${org.id}`)).json();
+    expect(after.version).toBe(org.version);
+    expect(after.data).toEqual(org.data);
+
+    registryAnswer = async () => null;
+    const none = await call('POST', `/records/${org.id}/registry-refresh`);
+    expect(none.statusCode).toBe(404);
+    expect(none.json().errors[0].code).toBe('nip_not_found');
+    expect((await call('GET', `/records/${org.id}`)).json().version).toBe(org.version);
+  });
+
+  test('refresh: not an organization or unknown → 404, no NIP → 422 without a registry call', async () => {
+    registryCalls.length = 0;
+    registryAnswer = async () => ENTRY;
+    const anna = await create('Anna Reg', ['contact']);
+    const nonip = await create('Bez NIP', ['organization']);
+    const c = await call('POST', `/records/${anna.id}/registry-refresh`);
+    expect(c.statusCode).toBe(404);
+    expect(c.json().errors[0].code).toBe('not_found');
+    const m = await call('POST', `/records/${MISSING}/registry-refresh`);
+    expect(m.statusCode).toBe(404);
+    const n = await call('POST', `/records/${nonip.id}/registry-refresh`);
+    expect(n.statusCode).toBe(422);
+    expect(n.json().errors[0]).toMatchObject({ code: 'nip_invalid' });
+    expect(registryCalls).toEqual([]);
+    expect((await call('POST', '/records/not-a-guid/registry-refresh')).statusCode).toBe(400);
   });
 });

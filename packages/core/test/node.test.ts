@@ -17,6 +17,7 @@ test('loadConfigDir reads *.yaml and *.yml alphabetically and compiles', async (
   expect(c.sets.get('task')!.fields).toEqual(['hours', 'cost']);
   expect([...c.fields.keys()]).toEqual([
     'title', 'notes', 'needs_review', 'merged_into', 'org_kind', 'nip', 'address', 'email_domains',
+    'regon', 'krs', 'vat_status', 'bank_accounts', 'registry_checked_at',
     'contact', 'organization', 'role', 'position', 'active_from', 'active_to', 'is_primary', 'is_active',
     'hours', 'cost',
   ]);
