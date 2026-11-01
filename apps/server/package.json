@@ -9,6 +9,7 @@
   "dependencies": {
     "@icrm/core": "workspace:*",
     "@icrm/db": "workspace:*",
+    "exceljs": "^4",
     "fastify": "^5.12.6",
     "kysely": "^0.27",
     "zod": "^4.6.7"

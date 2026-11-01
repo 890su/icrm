@@ -43,3 +43,4 @@ export {
 export {
   queryRecords, QueryError, type QueryErrorCode, type QueryInput, type QueryOutput,
 } from './query.js';
+export type { ImportRow, ImportTable } from './contacts/import.js';
