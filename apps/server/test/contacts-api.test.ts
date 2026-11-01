@@ -258,3 +258,83 @@ describe('merge', () => {
     expect(again.json().errors[0].code).toBe('merge_archived');
   });
 });
+
+describe('duplicates', () => {
+  test('POST /records of a contact returns possibleDuplicates; of a task it does not', async () => {
+    const first = await call('POST', '/records', { title: 'Zofia Dubel', sets: ['contact'] });
+    expect(first.statusCode, first.body).toBe(201);
+    expect(first.json().possibleDuplicates).toEqual([]);
+
+    const second = await call('POST', '/records', { title: 'Dubel Zofia', sets: ['contact'] });
+    expect(second.statusCode, second.body).toBe(201);
+    expect(second.json().possibleDuplicates).toEqual([
+      { id: first.json().id, title: 'Zofia Dubel', similarity: 1, reasons: ['same_name'] }]);
+
+    const firm = await call('POST', '/records', { title: 'Firma Dubel', sets: ['organization'] });
+    expect(firm.json().possibleDuplicates).toEqual([]);
+    const firm2 = await call('POST', '/records', { title: 'FIRMA DUBEL Sp. z o.o.', sets: ['organization'] });
+    expect(firm2.json().possibleDuplicates).toEqual([expect.objectContaining({ id: firm.json().id, reasons: ['same_name'] })]);
+
+    const task = await call('POST', '/records', { title: 'Zofia Dubel', sets: ['task'] });
+    expect(task.statusCode, task.body).toBe(201);
+    expect(task.json()).not.toHaveProperty('possibleDuplicates');
+
+    // a failed save is still the usual error body, and a PATCH carries no hint
+    expect((await call('POST', '/records', { title: 'X', sets: ['nope'] })).json()).not.toHaveProperty('possibleDuplicates');
+    const patched = await call('PATCH', `/records/${second.json().id}`, { version: second.json().version, title: 'Dubel Zofia 2' });
+    expect(patched.statusCode, patched.body).toBe(200);
+    expect(patched.json()).not.toHaveProperty('possibleDuplicates');
+  });
+
+  test('GET /records/:id/duplicates → items, 404 for an unknown record, 400 for a bad id', async () => {
+    const a = await create('Ignacy Podobny', ['contact']);
+    const b = await create('Podobny Ignacy', ['contact']);
+    const res = await call('GET', `/records/${a.id}/duplicates`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({ items: [{ id: b.id, title: 'Podobny Ignacy', similarity: 1, reasons: ['same_name'] }] });
+    expect((await call('GET', `/records/${MISSING}/duplicates`)).statusCode).toBe(404);
+    expect((await call('GET', '/records/nope/duplicates')).statusCode).toBe(400);
+  });
+
+  test('GET /duplicates lists pairs; validates set and pagination', async () => {
+    const a = await create('Walenty Parowy', ['contact']);
+    const b = await create('Parowy Walenty', ['contact']);
+    const [lo, hi] = a.id < b.id ? [a, b] : [b, a];
+    const res = await call('GET', '/duplicates?set=contact&limit=200');
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().items).toContainEqual({
+      a: { id: lo.id, title: lo.id === a.id ? 'Walenty Parowy' : 'Parowy Walenty' },
+      b: { id: hi.id, title: hi.id === a.id ? 'Walenty Parowy' : 'Parowy Walenty' },
+      similarity: 1, reasons: ['same_name'] });
+    expect((await call('GET', '/duplicates?set=organization&limit=1&offset=0')).json().items.length).toBeLessThanOrEqual(1);
+
+    for (const bad of ['', '?set=task', '?set=contact&limit=500', '?set=contact&limit=0', '?set=contact&offset=-1',
+      '?set=contact&limit=x', '?set=contact&extra=1']) {
+      expect((await call('GET', `/duplicates${bad}`)).statusCode, bad).toBe(400);
+    }
+  });
+
+  test('POST /duplicates/dismiss → 204, then the pair is gone; 422 / 404 / 400', async () => {
+    const a = await create('Hubert Odrzucany', ['contact']);
+    const b = await create('Odrzucany Hubert', ['contact']);
+    const org = await create('Firma Odrzucana', ['organization']);
+    expect((await call('GET', `/records/${a.id}/duplicates`)).json().items).toHaveLength(1);
+
+    const done = await call('POST', '/duplicates/dismiss', { a: b.id, b: a.id });
+    expect(done.statusCode, done.body).toBe(204);
+    expect(done.body).toBe('');
+    expect((await call('POST', '/duplicates/dismiss', { a: a.id, b: b.id })).statusCode).toBe(204);
+    expect((await call('GET', `/records/${a.id}/duplicates`)).json()).toEqual({ items: [] });
+    const pairs = (await call('GET', '/duplicates?set=contact&limit=200')).json().items as { a: { id: string } }[];
+    expect(pairs.filter((p) => p.a.id === a.id || p.a.id === b.id)).toEqual([]);
+
+    const mismatch = await call('POST', '/duplicates/dismiss', { a: a.id, b: org.id });
+    expect(mismatch.statusCode).toBe(422);
+    expect(mismatch.json().errors[0].code).toBe('merge_kind_mismatch');
+    expect((await call('POST', '/duplicates/dismiss', { a: a.id, b: a.id })).json().errors[0].code).toBe('merge_self');
+    expect((await call('POST', '/duplicates/dismiss', { a: a.id, b: MISSING })).statusCode).toBe(404);
+    expect((await call('POST', '/duplicates/dismiss', { a: a.id })).statusCode).toBe(400);
+    expect((await call('POST', '/duplicates/dismiss', { a: a.id, b: b.id, extra: 1 })).statusCode).toBe(400);
+    expect((await call('POST', '/duplicates/dismiss', { a: 'x', b: b.id })).statusCode).toBe(400);
+  });
+});

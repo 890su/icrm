@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import type { Kysely } from 'kysely';
 import { registerAuth } from './auth.js';
 import { registerErrorHandling } from './errors.js';
+import { registerDuplicateRoutes } from './routes/duplicates.js';
 import { registerIdentityRoutes } from './routes/identities.js';
 import { registerMembershipRoutes } from './routes/memberships.js';
 import { registerMergeRoutes } from './routes/merge.js';
@@ -43,7 +44,8 @@ export function buildServer(o: ServerOptions): FastifyInstance {
 
   const services = createServices({ db: o.db, cfg: o.cfg, workspaceId: o.workspaceId, now });
   registerMetaRoutes(app, o);
-  registerRecordRoutes(app, { service: services.records, systemUserId: o.systemUserId });
+  registerRecordRoutes(app, { service: services.records, duplicates: services.duplicates, systemUserId: o.systemUserId });
+  registerDuplicateRoutes(app, { duplicates: services.duplicates, records: services.records, systemUserId: o.systemUserId });
   registerIdentityRoutes(app, { identities: services.identities, contacts: services.contacts, systemUserId: o.systemUserId });
   registerMembershipRoutes(app, { contacts: services.contacts, systemUserId: o.systemUserId });
   registerMergeRoutes(app, { contacts: services.contacts, systemUserId: o.systemUserId });

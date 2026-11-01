@@ -203,3 +203,87 @@ describe('liveness and the index', () => {
     expect(rows.length).toBe(n);
   });
 });
+
+describe('pairs and dismissals', () => {
+  // The pair list is global to the workspace, so this block runs on its own database (the blocks above are done).
+  beforeAll(async () => {
+    ({ db, workspaceId, userId } = await freshDb());
+    svc = createServices({ db, cfg: await loadConfigDir(CONFIG_DIR), workspaceId });
+  });
+
+  const ref = (r: RecordView) => ({ id: r.id, title: r.title });
+  const ordered = (x: RecordView, y: RecordView): [RecordView, RecordView] => (x.id < y.id ? [x, y] : [y, x]);
+  const errCode = async (p: Promise<{ ok: true } | { ok: false; errors: { code: string }[] }>): Promise<string> => {
+    const r = await p;
+    if (r.ok) throw new Error('expected a failure');
+    return r.errors[0]!.code;
+  };
+
+  test('pairs list each pair once with a.id < b.id, by similarity then ids', async () => {
+    const a = await contact('Anna Nowak');
+    const b = await contact('Nowak Anna');
+    const c = await contact('Piotr Lisowski Zbigniew');
+    const d = await contact('Piotr Lisowski Zbigniew Jr');
+    const firma = await organization('Firma Pl');
+    await membership(c, firma);
+    await membership(d, firma);
+
+    const [lo, hi] = ordered(a, b);
+    const [clo, chi] = ordered(c, d); // c and d are similar (< 1) and share an organization
+    const pairs = await svc.duplicates.pairs('contact');
+    expect(pairs).toEqual([
+      { a: ref(lo), b: ref(hi), similarity: 1, reasons: ['same_name'] },
+      { a: ref(clo), b: ref(chi), similarity: expect.any(Number), reasons: ['similar_name', 'shared_organization'] },
+    ]);
+    expect(pairs[1]!.similarity).toBeLessThan(1);
+    expect(pairs.every((p) => p.a.id < p.b.id)).toBe(true);
+    expect(await svc.duplicates.pairs('organization')).toEqual([]);
+  });
+
+  test('pairs of organizations, and pagination', async () => {
+    const x = await organization('Dwa Razy Sp. z o.o.', { address: 'Lipowa 7' });
+    const y = await organization('DWA RAZY', { address: 'Inna 1' });
+    const z = await organization('Trzy Razy', { address: 'Lipowa 7' });
+    const [pa, pb] = ordered(x, y);
+    const all = await svc.duplicates.pairs('organization');
+    expect(all.map((p) => [p.a.id, p.b.id]).sort()).toEqual([[pa.id, pb.id], ordered(x, z).map((r) => r.id)].sort());
+    expect(all[0]!.reasons).toEqual(['same_name']); // similarity 1 first
+    expect(await svc.duplicates.pairs('organization', { limit: 1 })).toEqual([all[0]]);
+    expect(await svc.duplicates.pairs('organization', { limit: 1, offset: 1 })).toEqual([all[1]]);
+    expect(await svc.duplicates.pairs('organization', { offset: 2 })).toEqual([]);
+  });
+
+  test('a dismissed pair stays dismissed after a rename', async () => {
+    const a = await contact('Jan Odrzucony');
+    const b = await contact('Odrzucony Jan');
+    const before = (await svc.duplicates.pairs('contact')).filter((p) => [p.a.id, p.b.id].includes(a.id));
+    expect(before).toHaveLength(1);
+    expect(await svc.duplicates.dismiss({ a: b.id, b: a.id, userId })).toEqual({ ok: true }); // argument order is free
+    expect(await svc.duplicates.dismiss({ a: a.id, b: b.id, userId })).toEqual({ ok: true }); // repeating is harmless
+    const rows = await db.selectFrom('duplicate_dismissals').selectAll().where('workspace_id', '=', workspaceId).execute();
+    const [lo, hi] = ordered(a, b);
+    expect(rows.filter((r) => r.a_id === lo.id)).toEqual([expect.objectContaining({ a_id: lo.id, b_id: hi.id, created_by: userId })]);
+
+    must(await svc.records.update({ id: a.id, userId, expectedVersion: a.version, title: 'Jan  Odrzucony' }));
+    expect(await dup(a.id)).toEqual([]);
+    expect((await svc.duplicates.pairs('contact')).filter((p) => [p.a.id, p.b.id].includes(a.id))).toEqual([]);
+  });
+
+  test('dismiss checks kind, self and liveness', async () => {
+    const c = await contact('Kontakt Sprawdzany');
+    const o = await organization('Organizacja Sprawdzana');
+    const plain = await create('Zwykla', []);
+    const gone = await contact('Kontakt Archiwalny');
+    must(await svc.records.archive({ id: gone.id, userId }));
+    const both = await create('Obie Role', ['contact', 'organization']);
+    const d = (a: string, b: string) => svc.duplicates.dismiss({ a, b, userId });
+
+    expect(await errCode(d(c.id, o.id))).toBe('merge_kind_mismatch');
+    expect(await errCode(d(c.id, plain.id))).toBe('merge_kind_mismatch');
+    expect(await errCode(d(c.id, c.id))).toBe('merge_self');
+    expect(await errCode(d(c.id, gone.id))).toBe('not_found');
+    expect(await errCode(d(c.id, '0198a000-0000-7000-8000-000000000000'))).toBe('not_found');
+    expect(await d(c.id, both.id)).toEqual({ ok: true }); // both are contacts
+    expect(await d(o.id, both.id)).toEqual({ ok: true }); // both are organizations
+  });
+});

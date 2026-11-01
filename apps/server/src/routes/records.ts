@@ -1,5 +1,5 @@
 import type { Value } from '@icrm/core';
-import type { RecordService } from '@icrm/db';
+import type { DuplicateService, RecordService } from '@icrm/db';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { notFoundBody, sendSaved } from '../errors.js';
@@ -46,13 +46,18 @@ const patchBody = z.strictObject({
 const linksBody = z.strictObject({ targetIds: ids });
 
 export function registerRecordRoutes(
-  app: FastifyInstance, o: { service: RecordService; systemUserId: string },
+  app: FastifyInstance, o: { service: RecordService; duplicates: DuplicateService; systemUserId: string },
 ): void {
   const userId = o.systemUserId;
 
   app.post('/records', async (req, reply) => {
     const b = createBody.parse(req.body);
-    return sendSaved(reply, await o.service.create({ userId, ...b }), 201);
+    const res = await o.service.create({ userId, ...b });
+    // A hint for a new contact/organization, looked up after the save: it never blocks or fails the save.
+    if (res.ok && res.record.sets.some((s) => s.key === 'contact' || s.key === 'organization')) {
+      return reply.code(201).send({ ...res.record, possibleDuplicates: await o.duplicates.duplicatesOf(res.record.id) });
+    }
+    return sendSaved(reply, res, 201);
   });
 
   app.get('/records/:id', async (req, reply) => {
