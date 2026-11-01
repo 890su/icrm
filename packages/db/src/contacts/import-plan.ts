@@ -98,6 +98,9 @@ export class Overlay {
   }
 }
 
+/** The warning of a created contact with no address of its own. */
+export const NO_ADDRESS_WARNING = 'нет адреса — повторный импорт создаст контакт снова';
+
 const addressKey = (channel: Channel, normalized: string): string => `${channel}:${normalized}`;
 const pairKey = (contactRef: string, organizationRef: string): string => `${contactRef} ${organizationRef}`;
 const lowerFirst = (s: string): string => s.charAt(0).toLowerCase() + s.slice(1);
@@ -149,6 +152,8 @@ export async function planRow(tx: Db, deps: PlanDeps, row: ImportRow, overlay: O
     contact = await updateOf(tx, deps.workspaceId, matchedRef, title, values, overlay);
   } else if (title !== null || fresh.length > 0) {
     action = 'create';
+    // Only an address matches a contact: the same row next time is a new contact again.
+    if (fresh.length === 0) warnings.push(NO_ADDRESS_WARNING);
     const name = title ?? fresh[0]!.display;
     contact = { ref: overlay.newRef(), version: null, title: name, data: values, after: { title: name, data: values } };
   } else {
@@ -289,6 +294,16 @@ async function updateOf(
   };
 }
 
+/** A found organization: never changed by an import, so the row's organization cells are a warning naming their columns. */
+function found(
+  cfg: CompiledConfig, ref: string, o: NonNullable<ImportRow['organization']>, columns: Record<string, string> | undefined,
+  warnings: string[],
+): RowPlan['organization'] {
+  const names = Object.keys(o.data).map((k) => `«${columns?.[`organization.${k}`] ?? cfg.fields.get(k)?.label ?? k}»`);
+  if (names.length > 0) warnings.push(`Организация найдена — колонки ${names.join(', ')} не записаны`);
+  return { action: 'found', ref };
+}
+
 async function organizationOf(
   tx: Db, deps: PlanDeps, o: NonNullable<ImportRow['organization']>, columns: Record<string, string> | undefined,
   overlay: Overlay, warnings: string[],
@@ -297,7 +312,7 @@ async function organizationOf(
   const nip = rawNip === null ? null : normalizeNip(rawNip);
   if (rawNip !== null && nip === null) warnings.push(`NIP «${rawNip}» неверный и не используется`);
   const byNip = nip === null ? undefined : overlay.nips.get(nip) ?? await organizationByNip(tx, deps.workspaceId, nip);
-  if (byNip !== undefined) return { action: 'found', ref: byNip };
+  if (byNip !== undefined) return found(deps.cfg, byNip, o, columns, warnings);
 
   const title = trimmed(o.title);
   const nameNorm = title === null ? '' : normalizeCompanyName(title);
@@ -311,7 +326,7 @@ async function organizationOf(
     if (nip !== null && pick.nip === null) {
       warnings.push(`NIP «${nip}» не записан: организация «${pick.title}» найдена по названию, импорт не меняет организации`);
     }
-    return { action: 'found', ref: pick.id };
+    return found(deps.cfg, pick.id, o, columns, warnings);
   }
 
   if (title === null) {

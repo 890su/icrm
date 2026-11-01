@@ -10,6 +10,8 @@ import { freshDb } from './setup-pg.js';
 
 const CONFIG_DIR = fileURLToPath(new URL('./fixtures/contacts/', import.meta.url));
 const NOW = new Date('2026-11-01T12:00:00Z');
+/** The warning of every created contact without an address (spec 2b §7.3). */
+const NO_ADDRESS = 'нет адреса — повторный импорт создаст контакт снова';
 
 let db: Kysely<DB>;
 let workspaceId: string;
@@ -137,7 +139,7 @@ describe('preview', () => {
     if (!mapped.ok) throw new Error('mapping failed');
     const [res] = await imp.preview(mapped.rows);
     expect(res).toEqual(expect.objectContaining({ action: 'create' }));
-    expect(res!.warnings).toEqual([expect.stringContaining('«Sprawdzić»')]);
+    expect(res!.warnings).toEqual([expect.stringContaining('«Sprawdzić»'), NO_ADDRESS]);
   });
 });
 
@@ -174,7 +176,7 @@ describe('commit', () => {
   test('empty row and invalid addresses', async () => {
     const res = await imp.preview([row({}), row({ notes: 'tylko notatka' }), row({ title: 'Kazimierz', phone: '12' })]);
     expect(res.map((r) => [r.action, r.reason])).toEqual([['skip', 'empty_row'], ['skip', 'empty_row'], ['create', undefined]]);
-    expect(res[2]!.warnings).toEqual([expect.stringContaining('«12»')]);
+    expect(res[2]!.warnings).toEqual([expect.stringContaining('«12»'), NO_ADDRESS]);
 
     const [done] = await imp.commit([row({ title: 'Kazimierz', phone: '12' })], userId);
     expect(done).toEqual(expect.objectContaining({ action: 'create' }));
@@ -215,9 +217,9 @@ describe('commit', () => {
     expect(res[2]!.organization).toEqual({ action: 'create', id: expect.any(String) });
     expect(res[2]!.membership).toBe('create');
     expect(res[3]!.organization).toBeNull();
-    expect(res[3]!.warnings).toEqual([expect.stringContaining('«123»'), expect.stringContaining('организац')]);
+    expect(res[3]!.warnings).toEqual([NO_ADDRESS, expect.stringContaining('«123»'), expect.stringContaining('организац')]);
     expect(res[4]!.organization).toBeNull();
-    expect(res[4]!.warnings).toEqual([expect.stringContaining('организац')]);
+    expect(res[4]!.warnings).toEqual([NO_ADDRESS, expect.stringContaining('организац')]);
     // A name that is only a legal form has no key: never matches, and "Sp. z o.o." is created as is.
     expect(res[5]!.organization).toEqual({ action: 'create', id: expect.any(String) });
     expect((await svc.records.get(alfa.id))?.title).toBe('Alfa Sp. z o.o.');
@@ -234,9 +236,9 @@ describe('commit', () => {
     expect(other!.organization!.id).not.toBe(delta.id);
     const created = await svc.records.get(other!.organization!.id!);
     expect([created?.title, created?.data.nip]).toEqual(['Delta', '2222301418']);
-    expect(other!.warnings).toEqual([]);
+    expect(other!.warnings).toEqual([NO_ADDRESS]);
     expect(noNip!.organization).toEqual({ action: 'found', id: epsilon.id });
-    expect(noNip!.warnings).toEqual([expect.stringContaining('NIP «2222380607» не записан')]);
+    expect(noNip!.warnings).toEqual([NO_ADDRESS, expect.stringContaining('NIP «2222380607» не записан')]);
     expect((await svc.records.get(epsilon.id))?.data.nip ?? null).toBeNull();
   });
 
@@ -245,12 +247,12 @@ describe('commit', () => {
       { Kto: 'contact.title', Firma: 'organization.title', Typ: 'organization.org_kind', Rola: 'membership.role' });
     if (!mapped.ok) throw new Error('mapping failed');
     const expected = expect.objectContaining({ action: 'create', organization: expect.objectContaining({ action: 'create' }),
-      membership: 'create', warnings: [expect.stringContaining('«Typ»'), expect.stringContaining('«Rola»')] });
+      membership: 'create', warnings: [NO_ADDRESS, expect.stringContaining('«Typ»'), expect.stringContaining('«Rola»')] });
     expect(await imp.preview(mapped.rows)).toEqual([expected]);
     const [done] = await imp.commit(mapped.rows, userId);
     expect(done).toEqual(expected);
     expect(done!.errors).toBeUndefined();
-    expect(done!.warnings[0]).toContain('«hurtownia»');
+    expect(done!.warnings[1]).toContain('«hurtownia»');
     expect((await svc.records.get(done!.organization!.id!))?.data.org_kind ?? null).toBeNull();
     const person = await svc.records.get(done!.contactId!);
     expect(person?.memberships).toEqual([expect.objectContaining({ role: [] })]);
@@ -273,12 +275,62 @@ describe('commit', () => {
     }
   });
 
+  test('onRowError receives the cause of an unexpected row failure and its line', async () => {
+    const lost = new Error('connection lost');
+    const spy = vi.spyOn(svc.records, 'transaction').mockImplementation(() => Promise.reject(lost));
+    const seen: [unknown, number][] = [];
+    try {
+      const rows = [row({ title: 'E1' })];
+      const res = await imp.commit(rows, userId, { onRowError: (err, line) => seen.push([err, line]) });
+      expect(res.map((r) => r.action)).toEqual(['error']);
+      expect(seen).toEqual([[lost, rows[0]!.line]]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a created row without an address warns that a re-import creates it again, in preview and commit', async () => {
+    const rows = [row({ title: 'Bez adresu' }), row({ title: 'Z adresem', email: 'z-adresem@x.pl' })];
+    const preview = await imp.preview(rows);
+    expect(preview.map((r) => [r.action, r.warnings])).toEqual([['create', [NO_ADDRESS]], ['create', []]]);
+    const commit = await imp.commit(rows, userId);
+    expect(commit.map((r) => [r.action, r.warnings])).toEqual([['create', [NO_ADDRESS]], ['create', []]]);
+    // and it does: the row without an address is a new contact again, the other one is found
+    const again = await imp.commit(rows, userId);
+    expect(again.map((r) => r.action)).toEqual(['create', 'update']);
+    expect(again[0]!.contactId).not.toBe(commit[0]!.contactId);
+  });
+
+  test('a found organization does not take the row\'s organization columns: a warning names them', async () => {
+    const zeta = await create('Zeta Sp. z o.o.', ['organization'], { nip: '1111503006' });
+    const mapped = imp.rowsFromTable(
+      table(['Kto', 'Mail', 'Firma', 'NIP', 'Typ', 'Domeny'], [
+        ['Zofia', 'zofia@zeta.pl', 'Inna nazwa', '1111503006', 'фирма', 'zeta.pl'],
+        ['Zenek', 'zenek@zeta.pl', 'ZETA', '', 'фирма', ''],
+        ['Zuza', 'zuza@zeta.pl', 'Zeta', '', '', ''],
+      ]),
+      { Kto: 'contact.title', Mail: 'identity.email', Firma: 'organization.title', NIP: 'organization.nip',
+        Typ: 'organization.org_kind', Domeny: 'organization.email_domains' });
+    if (!mapped.ok) throw new Error('mapping failed');
+    const preview = await imp.preview(mapped.rows);
+    expect(preview.map((r) => r.organization)).toEqual([
+      { action: 'found', id: zeta.id }, { action: 'found', id: zeta.id }, { action: 'found', id: zeta.id }]);
+    expect(preview.map((r) => r.warnings)).toEqual([
+      ['Организация найдена — колонки «Typ», «Domeny» не записаны'],
+      ['Организация найдена — колонки «Typ» не записаны'],
+      [],
+    ]);
+    const commit = await imp.commit(mapped.rows, userId);
+    expect(commit.map((r) => r.warnings)).toEqual(preview.map((r) => r.warnings));
+    expect((await svc.records.get(zeta.id))?.data.org_kind ?? null).toBeNull();
+  });
+
   test('an address owned by an organization is not a person match', async () => {
     const org = await create('Firma Biuro', ['organization']);
     await address(org.id, 'email', 'biuro@firma-biuro.pl');
     const [res] = await imp.commit([row({ title: 'Ola', email: 'biuro@firma-biuro.pl' })], userId);
     expect(res).toEqual(expect.objectContaining({ action: 'create' }));
-    expect(res!.warnings).toEqual([expect.stringContaining('biuro@firma-biuro.pl')]);
+    expect(res!.warnings).toEqual([expect.stringContaining('biuro@firma-biuro.pl'), NO_ADDRESS]);
     expect(await identitiesOf(res!.contactId!)).toEqual([]);
     expect(await identitiesOf(org.id)).toEqual(['biuro@firma-biuro.pl']);
   });

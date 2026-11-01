@@ -138,9 +138,12 @@ export class ImportService {
    * Imports the rows one by one, each re-planned against the database and carried out in one transaction
    * (contact, new addresses, organization, membership). A row whose save fails is `error` with its errors
    * and leaves nothing behind; the rows after it go on. Any other failure of a row (retries exhausted, a lost
-   * connection, a bug) is reported for that row as `internal` too, so the report covers every row.
+   * connection, a bug) is reported for that row as `internal` too, so the report covers every row, and its
+   * cause goes to `opts.onRowError` (the db package has no logger; the caller logs it).
    */
-  async commit(rows: ImportRow[], userId: string): Promise<RowResult[]> {
+  async commit(
+    rows: ImportRow[], userId: string, opts: { onRowError?: (err: unknown, line: number) => void } = {},
+  ): Promise<RowResult[]> {
     const out: RowResult[] = [];
     for (const row of rows) {
       let plan: RowPlan | undefined;
@@ -152,8 +155,9 @@ export class ImportService {
           return this.execute(ops, plan, userId);
         });
         out.push(res.ok ? res.value : failed(res.errors));
-      } catch {
-        // The db package has no logger; the row's report says it failed, the next rows go on.
+      } catch (e) {
+        // The row's report says it failed, the next rows go on.
+        opts.onRowError?.(e, row.line);
         out.push(failed([recordError('internal', 'Внутренняя ошибка при импорте строки')]));
       }
     }
