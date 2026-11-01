@@ -55,7 +55,14 @@ export function registerRecordRoutes(
     const res = await o.service.create({ userId, ...b });
     // A hint for a new contact/organization, looked up after the save: it never blocks or fails the save.
     if (res.ok && res.record.sets.some((s) => s.key === 'contact' || s.key === 'organization')) {
-      return reply.code(201).send({ ...res.record, possibleDuplicates: await o.duplicates.duplicatesOf(res.record.id) });
+      // The record is already committed: a failing lookup must not turn that into an error (a retry would duplicate it).
+      let possibleDuplicates: Awaited<ReturnType<DuplicateService['duplicatesOf']>> = [];
+      try {
+        possibleDuplicates = await o.duplicates.duplicatesOf(res.record.id);
+      } catch (err) {
+        req.log.warn({ err, recordId: res.record.id }, 'possibleDuplicates lookup failed after a successful save');
+      }
+      return reply.code(201).send({ ...res.record, possibleDuplicates });
     }
     return sendSaved(reply, res, 201);
   });

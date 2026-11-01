@@ -1,8 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { loadConfigDir } from '@icrm/core/node';
+import { DuplicateService } from '@icrm/db';
 import { freshDb } from '@icrm/db/testing';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import { buildServer } from '../src/server.js';
 
 const TOKEN = 'test-token-0123456789';
@@ -284,6 +285,19 @@ describe('duplicates', () => {
     const patched = await call('PATCH', `/records/${second.json().id}`, { version: second.json().version, title: 'Dubel Zofia 2' });
     expect(patched.statusCode, patched.body).toBe(200);
     expect(patched.json()).not.toHaveProperty('possibleDuplicates');
+  });
+
+  test('a failing duplicate lookup does not fail a committed save: 201 with possibleDuplicates []', async () => {
+    const spy = vi.spyOn(DuplicateService.prototype, 'duplicatesOf').mockRejectedValue(new Error('db timeout'));
+    try {
+      const res = await call('POST', '/records', { title: 'Lookup Pada', sets: ['contact'] });
+      expect(res.statusCode, res.body).toBe(201);
+      expect(res.json()).toMatchObject({ title: 'Lookup Pada', possibleDuplicates: [] });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect((await call('GET', `/records/${res.json().id}`)).statusCode).toBe(200); // it was saved exactly once
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('GET /records/:id/duplicates → items, 404 for an unknown record, 400 for a bad id', async () => {

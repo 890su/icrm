@@ -133,6 +133,10 @@ export class DuplicateService {
    * The candidate pairs among all live records of `kind`, each pair once with `a.id < b.id`, by similarity
    * desc then `a.id`, `b.id`. The rules are those of `duplicatesOf`, run for every record (in batches, one
    * transaction each); a pair is taken from whichever side finds it. Dismissed pairs are never listed.
+   *
+   * Cost: one candidate search per live record of the kind on every call, and every page repeats it (the
+   * sort and `limit`/`offset` are applied in memory). Accepted for the internal scale; a workspace with many
+   * thousands of contacts needs a set-based query or a cached pair list.
    */
   async pairs(kind: DuplicateKind, page: { limit?: number; offset?: number } = {}): Promise<DuplicatePair[]> {
     if (!this.cfg.sets.has(kind)) return [];
