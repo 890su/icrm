@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import { describe, expect, test } from 'vitest';
-import { parseCsv, parseImportFile, parseVcard, parseXlsx, UnsupportedFormat } from '../src/import/parse.js';
+import { MAX_IMPORT_ROWS, parseCsv, parseImportFile, parseVcard, parseXlsx, UnsupportedFormat } from '../src/import/parse.js';
 
 const utf8 = (s: string): Uint8Array => new TextEncoder().encode(s);
 
@@ -91,6 +91,46 @@ describe('parseXlsx', () => {
         { line: 4, cells: ['Piotr', '', '1.5', '', ''] },
       ],
     });
+  });
+});
+
+describe('row cap and sparse sheets', () => {
+  test('a sparse XLSX with a stray far cell parses quickly and keeps its line number', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('S');
+    const cols = Array.from({ length: 20 }, (_, i) => `H${i + 1}`);
+    ws.addRow(cols);
+    for (let r = 2; r <= 5; r++) ws.addRow(cols.map((_, i) => `v${r}-${i}`));
+    ws.getCell('A100000').value = 'stray';
+    const bytes = new Uint8Array(await wb.xlsx.writeBuffer());
+    const started = Date.now();
+    const table = await parseXlsx(bytes);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(table.headers).toHaveLength(20);
+    expect(table.rows.map((r) => r.line)).toEqual([2, 3, 4, 5, 100000]);
+    expect(table.rows[4]!.cells).toEqual(['stray', ...Array<string>(19).fill('')]);
+  });
+
+  test('cells beyond the header width are ignored', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('S');
+    ws.addRow(['A', 'B']);
+    ws.addRow(['1', '2', '3']);
+    expect((await parseXlsx(new Uint8Array(await wb.xlsx.writeBuffer()))).rows).toEqual([{ line: 2, cells: ['1', '2'] }]);
+  });
+
+  test('XLSX and CSV rows are cut at MAX_IMPORT_ROWS + 1', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('S');
+    ws.addRow(['N']);
+    for (let i = 1; i <= MAX_IMPORT_ROWS + 100; i++) ws.addRow([String(i)]);
+    const x = await parseXlsx(new Uint8Array(await wb.xlsx.writeBuffer()));
+    expect(x.rows).toHaveLength(MAX_IMPORT_ROWS + 1);
+    expect(x.rows.at(-1)!.line).toBe(MAX_IMPORT_ROWS + 2);
+    const csv = ['N', ...Array.from({ length: MAX_IMPORT_ROWS + 100 }, (_, i) => String(i + 1))].join('\n');
+    const c = parseCsv(utf8(csv));
+    expect(c.rows).toHaveLength(MAX_IMPORT_ROWS + 1);
+    expect(c.rows.at(-1)!.line).toBe(MAX_IMPORT_ROWS + 2);
   });
 });
 

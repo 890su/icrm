@@ -208,15 +208,23 @@ function splitRecords(text: string, delimiter: string): string[][] {
 const padTo = (cells: string[], width: number): string[] =>
   cells.length >= width ? cells : [...cells, ...Array<string>(width - cells.length).fill('')];
 
+/**
+ * Upload limit on data rows, enforced by the import routes. The parsers keep at most
+ * `MAX_IMPORT_ROWS + 1` rows so the caller can tell "too large" without an unbounded table.
+ */
+export const MAX_IMPORT_ROWS = 5000;
+const ROW_CAP = MAX_IMPORT_ROWS + 1;
+
 /** Builds a table from records; `line` is the record's number in the file (header = 1). */
 function tableFrom(records: string[][]): ImportTable {
   if (records.length === 0) return { headers: [], rows: [] };
   const headers = records[0]!.map((h) => h.trim());
   const rows: ImportTable['rows'] = [];
-  records.slice(1).forEach((cells, i) => {
-    if (cells.every((c) => c.trim() === '')) return;
-    rows.push({ line: i + 2, cells: padTo(cells, headers.length) });
-  });
+  for (let i = 1; i < records.length && rows.length < ROW_CAP; i++) {
+    const cells = records[i]!;
+    if (cells.every((c) => c.trim() === '')) continue;
+    rows.push({ line: i + 1, cells: padTo(cells, headers.length) });
+  }
   return { headers, rows };
 }
 
@@ -253,13 +261,24 @@ export async function parseXlsx(bytes: Uint8Array): Promise<ImportTable> {
   }
   const sheet = workbook.worksheets[0];
   if (sheet === undefined) return { headers: [], rows: [] };
-  const width = sheet.columnCount;
-  const records: string[][] = [];
-  for (let r = 1; r <= sheet.rowCount; r++) {
-    const row = sheet.getRow(r);
-    const cells: string[] = [];
-    for (let c = 1; c <= width; c++) cells.push(cellText(row.getCell(c).value));
-    records.push(cells);
-  }
-  return tableFrom(records);
+  // Only non-empty rows and cells are visited: a stray cell far down the sheet must stay cheap.
+  const headers: string[] = [];
+  const rows: ImportTable['rows'] = [];
+  sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+    if (rowNumber === 1) {
+      row.eachCell({ includeEmpty: false }, (cell, col) => {
+        while (headers.length < col) headers.push('');
+        headers[col - 1] = cellText(cell.value).trim();
+      });
+      return;
+    }
+    if (headers.length === 0 || rows.length >= ROW_CAP) return;
+    const cells: string[] = Array<string>(headers.length).fill('');
+    row.eachCell({ includeEmpty: false }, (cell, col) => {
+      if (col <= headers.length) cells[col - 1] = cellText(cell.value);
+    });
+    if (cells.every((c) => c.trim() === '')) return;
+    rows.push({ line: rowNumber, cells });
+  });
+  return { headers, rows };
 }
