@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { ConfigError } from '@icrm/core';
 import { loadConfigDir } from '@icrm/core/node';
-import { createDb, ensureWorkspace, migrateToLatest, syncConfig } from '@icrm/db';
+import { createDb, DuplicateService, ensureWorkspace, migrateToLatest, syncConfig } from '@icrm/db';
 import { buildServer } from './server.js';
 import { logSyncReport } from './sync-log.js';
 
@@ -43,6 +43,12 @@ const app = buildServer({ db, cfg, workspaceId, systemUserId, apiToken, logger: 
 syncConfig(db, cfg, workspaceId, () => new Date()).then(
   (report) => logSyncReport(app.log, report),
   (err: unknown) => app.log.error(err, 'config sync failed'),
+).then(
+  // Records saved before the name index existed (or under another normalisation) get their rows.
+  () => new DuplicateService({ db, cfg, workspaceId }).reindex(),
+).then(
+  (rows) => app.log.info({ rows }, 'duplicate index rebuilt'),
+  (err: unknown) => app.log.error(err, 'duplicate index rebuild failed'),
 );
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

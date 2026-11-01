@@ -24,6 +24,10 @@ export type {
 export type {
   MergeChoice, MergeConflict, MergeInput, MergeKind, MergePreview, MergeStep,
 } from './contacts/merge.js';
+export {
+  DuplicateService, type DuplicateCandidate, type DuplicateKind, type DuplicateReason,
+} from './contacts/duplicates.js';
+export { upsertSearch } from './repo/search.js';
 export { contactBehaviors } from './contacts/behaviors.js';
 export { isActiveOn, membershipsOf, type MembershipView } from './contacts/memberships.js';
 export { createServices, type Services } from './services.js';

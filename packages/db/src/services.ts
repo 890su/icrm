@@ -1,6 +1,7 @@
 import type { CompiledConfig } from '@icrm/core';
 import type { Kysely } from 'kysely';
 import { contactBehaviors } from './contacts/behaviors.js';
+import { DuplicateService } from './contacts/duplicates.js';
 import { ContactService } from './contacts/contact-service.js';
 import { IdentityService } from './contacts/identities.js';
 import type { MergeStep } from './contacts/merge.js';
@@ -12,6 +13,7 @@ export interface Services {
   records: RecordService;
   identities: IdentityService;
   contacts: ContactService;
+  duplicates: DuplicateService;
 }
 
 /** `mergeSteps` — the steps of later sub-projects that every merge of duplicates runs (spec 2a §6.2 p.8). */
@@ -23,5 +25,6 @@ export function createServices(o: {
   const behaviors = contactBehaviors(identities, { cfg: o.cfg, workspaceId: o.workspaceId, now });
   const records = new RecordService({ ...o, behaviors });
   const contacts = new ContactService({ ...o, records, identities });
-  return { records, identities, contacts };
+  const duplicates = new DuplicateService(o);
+  return { records, identities, contacts, duplicates };
 }

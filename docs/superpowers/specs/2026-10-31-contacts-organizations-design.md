@@ -349,7 +349,9 @@ identities (id uuid pk, workspace_id,
 
 ### 7.1 Подсказка дублей
 
-Расширения Postgres `pg_trgm` и `unaccent` (есть в `postgres:16`).
+Расширение Postgres `pg_trgm` (есть в `postgres:16`).
+Нормализованные имена хранятся в таблице `record_search` (её пишет поведение
+наборов `contact`/`organization`); нормализацию выполняет одна функция `core`.
 Нормализация имени: нижний регистр, без диакритики, без знаков препинания,
 слова отсортированы; у организаций дополнительно отброшены правовые формы
 (`sp. z o.o.`, `s.a.`, `s.c.`, `sp.j.`, `sp.k.`, `spółka cywilna`,
@@ -434,9 +436,9 @@ CSV: разделитель `;` или `,` определяется по пер�
 - **`003_contacts` (2a):** `identities` с индексами (§3.1); вид `identity`
   в `change_log.kind`; частичный уникальный индекс
   `(workspace_id, (data->>'nip')) where archived_at is null and data ? 'nip'`.
-- **`004_duplicates` (2b):** `create extension pg_trgm, unaccent`;
-  неизменяемая обёртка над `unaccent` для индексов; `duplicate_dismissals`;
-  триграммный индекс по нормализованному заголовку записей.
+- **`004_duplicates` (2b):** `create extension pg_trgm`;
+  `record_search (record_id, workspace_id, kind, name_norm, address_norm)` с
+  триграммным индексом по `name_norm`; `duplicate_dismissals`.
 
 ## 9. Ошибки
 

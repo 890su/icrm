@@ -3,6 +3,7 @@ import {
   type CompiledConfig, type RecordError, type Value,
 } from '@icrm/core';
 import { sql } from 'kysely';
+import { upsertSearch } from '../repo/search.js';
 import type { Db } from '../repo/types.js';
 import type { SetBehavior } from '../service/behaviors.js';
 import { recordError } from '../service/errors.js';
@@ -66,7 +67,8 @@ async function organizationErrors(
  * The behaviours of the system sets. Addresses (spec 2a §3) go with the record that owns them: archiving a
  * record archives its live addresses (logged `cascade`), a view lists the live ones. A record with more than
  * one of the owner sets meets these hooks once per set: the second archive finds nothing live, and the view
- * is filled once. On top: an organization has its NIP and domains checked, a membership names itself and
+ * is filled once. Contacts and organizations also keep their name keys in the duplicate index
+ * (`record_search`). On top: an organization has its NIP and domains checked, a membership names itself and
  * keeps its constraints, and the views of contacts and organizations list memberships.
  */
 export function contactBehaviors(
@@ -76,6 +78,10 @@ export function contactBehaviors(
 
   const extras: Record<string, Omit<SetBehavior, 'set' | 'archived'>> = {
     contact: {
+      afterWrite: async (ctx, r) => {
+        await upsertSearch(ctx.tx, ctx.workspaceId, r.record);
+        return [];
+      },
       extendView: async (tx, rec, view) => {
         view.memberships = await membershipsOf(tx, o.cfg, o.workspaceId, { contactId: rec.id }, today());
       },
@@ -83,6 +89,10 @@ export function contactBehaviors(
     organization: {
       beforeInsert: (ctx, r) => organizationErrors(ctx.tx, ctx.workspaceId, r.input, null),
       beforeEvaluate: (ctx, r) => organizationErrors(ctx.tx, ctx.workspaceId, r.input, r.id),
+      afterWrite: async (ctx, r) => {
+        await upsertSearch(ctx.tx, ctx.workspaceId, r.record);
+        return [];
+      },
       extendView: async (tx, rec, view) => {
         view.memberships = await membershipsOf(tx, o.cfg, o.workspaceId, { organizationId: rec.id }, today());
       },

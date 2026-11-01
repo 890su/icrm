@@ -48,6 +48,31 @@ describe('db schema', () => {
     await mk('1234563218');
   });
 
+  test('migration 004: record_search kind check, trigram index and ordered dismissal pairs', async () => {
+    const { db, workspaceId } = await freshDb();
+    const mk = async (): Promise<string> => {
+      const id = uuidv7();
+      await db.insertInto('records').values({ id, workspace_id: workspaceId, title: 'r' }).execute();
+      return id;
+    };
+    const [a, b] = [await mk(), await mk()].sort() as [string, string];
+    const row = { record_id: a, workspace_id: workspaceId, name_norm: 'anna nowak' };
+    await expect(db.insertInto('record_search').values({ ...row, kind: 'task' as 'contact' }).execute())
+      .rejects.toThrow(/record_search_kind_check/);
+    await db.insertInto('record_search').values({ ...row, kind: 'contact' }).execute();
+    await expect(db.insertInto('record_search').values({ ...row, kind: 'contact' }).execute())
+      .rejects.toMatchObject({ code: '23505' });
+    await db.insertInto('record_search').values({ ...row, kind: 'organization' }).execute();
+    const idx = await sql<{ indexdef: string }>`select indexdef from pg_indexes where indexname = 'record_search_name_trgm'`.execute(db);
+    expect(idx.rows[0]?.indexdef).toMatch(/gin .*gin_trgm_ops/);
+
+    await expect(db.insertInto('duplicate_dismissals').values({ workspace_id: workspaceId, a_id: b, b_id: a }).execute())
+      .rejects.toThrow(/duplicate_dismissals_order/);
+    await db.insertInto('duplicate_dismissals').values({ workspace_id: workspaceId, a_id: a, b_id: b }).execute();
+    await expect(db.insertInto('duplicate_dismissals').values({ workspace_id: workspaceId, a_id: a, b_id: b }).execute())
+      .rejects.toMatchObject({ code: '23505' });
+  });
+
   test('ensureWorkspace is idempotent and seeds system@local', async () => {
     const { db } = await freshDb();
     const a = await ensureWorkspace(db, 'default');

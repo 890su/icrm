@@ -107,6 +107,25 @@ export interface IdentitiesTable {
   archived_at: NullableTimestamp;
 }
 
+export interface RecordSearchTable {
+  record_id: string;
+  workspace_id: string;
+  kind: 'contact' | 'organization';
+  /** Normalised title (`normalizePersonName` / `normalizeCompanyName`); empty when the title has no key. */
+  name_norm: string;
+  /** Normalised street address of an organization, null when it has none. */
+  address_norm: string | null;
+}
+
+export interface DuplicateDismissalsTable {
+  workspace_id: string;
+  /** The smaller id of the pair. */
+  a_id: string;
+  b_id: string;
+  created_by: string | null;
+  created_at: Generated<Date>;
+}
+
 export interface DB {
   workspaces: WorkspacesTable;
   users: UsersTable;
@@ -117,6 +136,8 @@ export interface DB {
   files: FilesTable;
   config_state: ConfigStateTable;
   identities: IdentitiesTable;
+  record_search: RecordSearchTable;
+  duplicate_dismissals: DuplicateDismissalsTable;
 }
 
 export type RecordRow = Selectable<RecordsTable>;
