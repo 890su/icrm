@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import type { Value } from '@icrm/core';
 import { loadConfigDir } from '@icrm/core/node';
 import type { Kysely } from 'kysely';
-import { beforeAll, describe, expect, test } from 'vitest';
+import { beforeAll, describe, expect, test, vi } from 'vitest';
 import {
   createServices, type DB, type ImportRow, type ImportTable, type RecordView, type SaveResult, type Services,
 } from '../src/index.js';
@@ -254,6 +254,23 @@ describe('commit', () => {
     expect((await svc.records.get(done!.organization!.id!))?.data.org_kind ?? null).toBeNull();
     const person = await svc.records.get(done!.contactId!);
     expect(person?.memberships).toEqual([expect.objectContaining({ role: [] })]);
+  });
+
+  test('a row that fails unexpectedly is internal and the others go on', async () => {
+    const original = svc.records.transaction.bind(svc.records);
+    let call = 0;
+    const spy = vi.spyOn(svc.records, 'transaction').mockImplementation((uid, work) => {
+      call += 1;
+      return call === 2 ? Promise.reject(new Error('connection lost')) : original(uid, work);
+    });
+    try {
+      const res = await imp.commit([row({ title: 'I1' }), row({ title: 'I2' }), row({ title: 'I3' })], userId);
+      expect(res.map((r) => r.action)).toEqual(['create', 'error', 'create']);
+      expect(res[1]).toEqual({ line: expect.any(Number), action: 'error', warnings: [],
+        errors: [{ code: 'internal', message: 'Внутренняя ошибка при импорте строки' }] });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('an address owned by an organization is not a person match', async () => {

@@ -137,17 +137,25 @@ export class ImportService {
   /**
    * Imports the rows one by one, each re-planned against the database and carried out in one transaction
    * (contact, new addresses, organization, membership). A row whose save fails is `error` with its errors
-   * and leaves nothing behind; the rows after it go on.
+   * and leaves nothing behind; the rows after it go on. Any other failure of a row (retries exhausted, a lost
+   * connection, a bug) is reported for that row as `internal` too, so the report covers every row.
    */
   async commit(rows: ImportRow[], userId: string): Promise<RowResult[]> {
     const out: RowResult[] = [];
     for (const row of rows) {
       let plan: RowPlan | undefined;
-      const res = await this.records.transaction(userId, async (ops) => {
-        plan = await planRow(ops.tx, this.deps(), row, new Overlay());
-        return this.execute(ops, plan, userId);
-      });
-      out.push(res.ok ? res.value : { line: row.line, action: 'error', warnings: plan?.warnings ?? [], errors: res.errors });
+      const failed = (errors: RecordError[]): RowResult =>
+        ({ line: row.line, action: 'error', warnings: plan?.warnings ?? [], errors });
+      try {
+        const res = await this.records.transaction(userId, async (ops) => {
+          plan = await planRow(ops.tx, this.deps(), row, new Overlay());
+          return this.execute(ops, plan, userId);
+        });
+        out.push(res.ok ? res.value : failed(res.errors));
+      } catch {
+        // The db package has no logger; the row's report says it failed, the next rows go on.
+        out.push(failed([recordError('internal', 'Внутренняя ошибка при импорте строки')]));
+      }
     }
     return out;
   }

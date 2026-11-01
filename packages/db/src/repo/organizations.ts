@@ -17,7 +17,8 @@ export async function organizationsByEmailDomain(
 export async function organizationByNip(tx: Db, workspaceId: string, nip: string): Promise<string | undefined> {
   const row = await tx.selectFrom('records as r').select('r.id')
     .where('r.workspace_id', '=', workspaceId).where('r.archived_at', 'is', null)
-    .where(sql<string>`r.data->>'nip'`, '=', nip)
+    // `data ? 'nip'` with `archived_at is null` lets the partial index `records_live_nip` serve the lookup.
+    .where(sql<boolean>`r.data ? 'nip'`).where(sql<string>`r.data->>'nip'`, '=', nip)
     .where((eb) => eb.exists(eb.selectFrom('record_sets as s').select('s.record_id')
       .whereRef('s.record_id', '=', 'r.id').where('s.set_key', '=', 'organization')))
     .orderBy('r.id').limit(1).executeTakeFirst();

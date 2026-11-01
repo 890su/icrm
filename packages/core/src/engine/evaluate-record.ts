@@ -22,7 +22,9 @@ export type ErrorCode = 'invalid_value' | 'invalid_option' | 'required' | 'valid
   | 'link_owned' | 'version_conflict' | 'not_found' | 'archived'
   | 'managed_field' | 'invalid_address' | 'identity_taken' | 'invalid_owner' | 'nip_invalid' | 'nip_taken'
   | 'public_domain' | 'membership_active_exists' | 'primary_conflict' | 'membership_ended'
-  | 'handover_target_invalid' | 'merge_kind_mismatch' | 'merge_self' | 'merge_archived';
+  | 'handover_target_invalid' | 'merge_kind_mismatch' | 'merge_self' | 'merge_archived'
+  /** An unexpected failure (not a refusal of the data), reported per row of an import. */
+  | 'internal';
 
 export interface RecordError {
   field?: string;
