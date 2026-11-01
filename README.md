@@ -202,6 +202,49 @@ curl -X POST http://127.0.0.1:3100/memberships/<id>/end   -H "Authorization: Bea
 curl -X POST http://127.0.0.1:3100/records/<id A>/merge   -H "Authorization: Bearer $ICRM_API_TOKEN" -H "Content-Type: application/json"   -d '{"into":"<id B>","values":{"notes":"source","nip":"target"}}'
 ```
 
+## Дубли, NIP и импорт
+
+Подробности — `docs/superpowers/specs/2026-10-31-contacts-organizations-design.md`, §7.
+
+**Дубли.** Подсказка, не запрет: сохранение никогда не блокируется. `POST /records` контакта или организации
+отвечает записью с `possibleDuplicates` (кандидаты с причинами). Имена сравниваются нормализованными (без регистра,
+диакритики и знаков, у организаций — без правовой формы вроде `sp. z o.o.`); у организаций учитываются также общий
+домен в `email_domains` и `address`. `GET /records/:id/duplicates` — кандидаты к записи, `GET /duplicates?set=contact|organization&limit=&offset=` —
+пары по всей базе, `POST /duplicates/dismiss` `{"a","b"}` — «не дубль» (пара больше не предлагается). Слить найденное —
+`POST /records/:id/merge` (см. выше).
+
+```sh
+curl "http://127.0.0.1:3100/duplicates?set=organization&limit=20" -H "Authorization: Bearer $ICRM_API_TOKEN"
+```
+
+**Заполнение по NIP.** Данные организации берутся из «белого списка» VAT Минфина (`wl-api.mf.gov.pl`, без ключа).
+`GET /registry/nip/:nip` показывает данные, ничего не сохраняя (`nip_invalid`, `nip_not_found`);
+`POST /records/:id/registry-refresh` записывает их в организацию через обычное сохранение: `title` и `address` —
+только если пусты, `regon`, `krs`, `vat_status`, `bank_accounts`, `registry_checked_at` — перезаписываются.
+Если реестр недоступен — 502 `registry_unavailable`. У сервиса суточный лимит запросов, поэтому вызывайте только
+по действию человека, не массово.
+
+```sh
+curl -X POST http://127.0.0.1:3100/records/<id организации>/registry-refresh -H "Authorization: Bearer $ICRM_API_TOKEN"
+```
+
+**Импорт контактов.** Принимает vCard (`.vcf`), CSV и XLSX (первый лист); в CSV и XLSX первая строка — заголовки.
+Запрос — `multipart/form-data` с файлом `file` и (для CSV/XLSX; для vCard игнорируется) полем `mapping` — JSON
+«заголовок колонки → поле»: `contact.title`, `contact.<поле>`, `identity.email|phone|telegram`, `organization.title`,
+`organization.nip`, `organization.<поле>`, `membership.role`, `membership.position`, `skip`. `POST /import/preview` —
+пробный прогон без записи, `POST /import/commit` — то же с записью, каждая строка в своей транзакции (ошибка
+строки не останавливает остальные). Ответ — `{"rows": [...]}`: по строке файла `action` (`create`, `update`, `skip`,
+`error`), `reason` (`ambiguous_match`, `empty_row`), `contactId`, организация, участие и `warnings`. Контакт ищется по
+адресам строки, организация — по NIP, иначе по названию, поэтому повторный импорт того же файла не создаёт дублей.
+Лимиты: файл до 5 МБ и до 5000 строк (иначе 413 `import_too_large`); нет файла, плохой JSON в `mapping` или
+неизвестный формат — 400 `bad_request`; неверное сопоставление (нет такой колонки, неизвестное поле) — 422 с `errors`.
+Файл не сохраняется.
+
+```sh
+curl -X POST http://127.0.0.1:3100/import/preview -H "Authorization: Bearer $ICRM_API_TOKEN"   -F file=@contacts.csv   -F 'mapping={"Имя":"contact.title","Почта":"identity.email","Телефон":"identity.phone","Фирма":"organization.title","NIP":"organization.nip"}'
+# если отчёт устраивает — тот же запрос на /import/commit
+```
+
 ## Проверки
 
 ```sh

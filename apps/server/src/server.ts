@@ -1,4 +1,5 @@
 import type { CompiledConfig } from '@icrm/core';
+import multipart from '@fastify/multipart';
 import { createServices, type DB } from '@icrm/db';
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import type { Kysely } from 'kysely';
@@ -7,6 +8,7 @@ import { registerErrorHandling } from './errors.js';
 import { MfWhiteList, type NipRegistry } from './registry/nip-registry.js';
 import { registerDuplicateRoutes } from './routes/duplicates.js';
 import { registerIdentityRoutes } from './routes/identities.js';
+import { MAX_IMPORT_BYTES, registerImportRoutes } from './routes/import.js';
 import { registerMembershipRoutes } from './routes/memberships.js';
 import { registerMergeRoutes } from './routes/merge.js';
 import { registerMetaRoutes } from './routes/meta.js';
@@ -45,6 +47,7 @@ export function buildServer(o: ServerOptions): FastifyInstance {
   acceptEmptyJsonBody(app);
   registerErrorHandling(app);
   registerAuth(app, o.apiToken);
+  app.register(multipart, { limits: { fileSize: MAX_IMPORT_BYTES, files: 1 } });
 
   const services = createServices({ db: o.db, cfg: o.cfg, workspaceId: o.workspaceId, now });
   registerMetaRoutes(app, o);
@@ -57,6 +60,7 @@ export function buildServer(o: ServerOptions): FastifyInstance {
     contacts: services.contacts, records: services.records, registry: o.nipRegistry ?? new MfWhiteList(), cfg: o.cfg, now,
     systemUserId: o.systemUserId,
   });
+  registerImportRoutes(app, { imports: services.imports, systemUserId: o.systemUserId });
   registerQueryRoutes(app, { db: o.db, cfg: o.cfg, workspaceId: o.workspaceId, now });
   return app;
 }

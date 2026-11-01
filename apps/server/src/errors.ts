@@ -17,6 +17,8 @@ export function statusOf(errors: RecordError[]): number {
 const oneError = (code: string, message: string): ErrorBody => ({ errors: [{ code, message }] });
 
 export const notFoundBody = (message: string): ErrorBody => oneError('not_found', message);
+export const badRequestBody = (message: string): ErrorBody => oneError('bad_request', message);
+export const tooLargeBody = (message: string): ErrorBody => oneError('import_too_large', message);
 
 /** Sends the saved record with `okStatus`, or the service's errors with the status they map to. */
 export function sendSaved(reply: FastifyReply, res: SaveResult, okStatus: number): FastifyReply {
@@ -49,6 +51,10 @@ export function registerErrorHandling(app: FastifyInstance): void {
     if (isDataException(err)) {
       req.log.warn({ code: (err as { code: string }).code, message: (err as Error).message }, 'data exception mapped to 400');
       return reply.code(400).send(oneError('bad_request', 'Недопустимое значение в запросе или в данных'));
+    }
+    // A file over the multipart limit (@fastify/multipart): only the import routes take files.
+    if ((err as { code?: unknown }).code === 'FST_REQ_FILE_TOO_LARGE') {
+      return reply.code(413).send(tooLargeBody('Файл больше 5 МБ'));
     }
     // Fastify's own client errors (malformed JSON, unsupported content type, body too large).
     const status = (err as { statusCode?: unknown }).statusCode;

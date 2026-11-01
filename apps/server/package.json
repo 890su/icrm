@@ -7,6 +7,7 @@
     "dev": "tsx --env-file-if-exists=../../.env src/main.ts"
   },
   "dependencies": {
+    "@fastify/multipart": "^9",
     "@icrm/core": "workspace:*",
     "@icrm/db": "workspace:*",
     "exceljs": "^4",
