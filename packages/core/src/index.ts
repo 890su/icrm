@@ -30,3 +30,7 @@ export {
   PUBLIC_EMAIL_DOMAINS,
 } from './contacts/normalize.js';
 export type { Channel, Normalized } from './contacts/normalize.js';
+export {
+  LEGAL_FORMS, normalizeCompanyName, normalizePersonName, normalizeStreetAddress, normalizeText,
+} from './contacts/names.js';
+export { coerceCell, type Coerced } from './contacts/cells.js';
