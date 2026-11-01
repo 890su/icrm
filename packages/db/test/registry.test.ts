@@ -72,3 +72,14 @@ test('an archived organization → not_found', async () => {
   const r = await svc.contacts.applyRegistryEntry({ id: org.id, entry: { ...ENTRY, nip: '1234563218' }, userId });
   expect(r).toEqual({ ok: false, errors: [expect.objectContaining({ code: 'not_found' })] });
 });
+
+test('an entry for another NIP than the organization has now → version_conflict, nothing written', async () => {
+  const org = await create('Zmieniony NIP', ['organization'], { nip: '7740001454' });
+  const r = await svc.contacts.applyRegistryEntry({ id: org.id, entry: { ...ENTRY, nip: '1111503006' }, userId });
+  expect(r).toEqual({ ok: false, errors: [expect.objectContaining({ code: 'version_conflict' })] });
+  const after = await svc.records.get(org.id);
+  expect(after!.version).toBe(org.version);
+  expect(after!.data.registry_checked_at ?? null).toBeNull();
+  // the same NIP written differently is the same NIP
+  must(await svc.contacts.applyRegistryEntry({ id: org.id, entry: { ...ENTRY, nip: '7740001454' }, userId }));
+});

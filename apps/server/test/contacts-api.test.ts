@@ -396,7 +396,8 @@ describe('NIP registry', () => {
 
   test('POST /records/:id/registry-refresh fills the organization from the registry', async () => {
     registryCalls.length = 0;
-    registryAnswer = async () => ENTRY;
+    // The white list answers for the NIP it was asked about.
+    registryAnswer = async () => ({ ...ENTRY, nip: '7740001454' });
     const org = (await call('POST', '/records', { title: '', sets: ['organization'], data: { nip: '774-000-14-54' } })).json();
     const r = await call('POST', `/records/${org.id}/registry-refresh`);
     expect(r.statusCode, r.body).toBe(200);
@@ -423,6 +424,42 @@ describe('NIP registry', () => {
     expect(none.statusCode).toBe(404);
     expect(none.json().errors[0].code).toBe('nip_not_found');
     expect((await call('GET', `/records/${org.id}`)).json().version).toBe(org.version);
+  });
+
+  test('refresh: the NIP changed while the registry was asked → 409 version_conflict, nothing written', async () => {
+    const org = (await call('POST', '/records', { title: 'Firma Stara', sets: ['organization'], data: { nip: '5213003700' } })).json();
+    let changed: { version: number } | undefined;
+    registryAnswer = async () => {
+      const r = await call('PATCH', `/records/${org.id}`, { version: org.version, data: { nip: '5272525995' } });
+      expect(r.statusCode, r.body).toBe(200);
+      changed = r.json();
+      return { ...ENTRY, nip: '5213003700' };
+    };
+    const r = await call('POST', `/records/${org.id}/registry-refresh`);
+    expect(r.statusCode, r.body).toBe(409);
+    expect(r.json().errors[0].code).toBe('version_conflict');
+    const after = (await call('GET', `/records/${org.id}`)).json();
+    expect(after.version).toBe(changed!.version);
+    expect(after.data.registry_checked_at ?? null).toBeNull();
+  });
+
+  test('registry down: the cause is logged as a warning', async () => {
+    const lines: string[] = [];
+    const fresh = await freshDb();
+    const logged = buildServer({
+      db: fresh.db, cfg: await loadConfigDir(fixture('contacts')), workspaceId: fresh.workspaceId, systemUserId: fresh.userId,
+      apiToken: TOKEN, nipRegistry: { lookup: async () => { throw new RegistryUnavailable('down', { cause: new Error('ECONNRESET') }); } },
+      logger: { level: 'warn', stream: { write: (line: string) => { lines.push(line); } } },
+    });
+    try {
+      const r = await logged.inject({ method: 'GET', url: '/registry/nip/5260250274', headers: { authorization: `Bearer ${TOKEN}` } });
+      expect(r.statusCode).toBe(502);
+      const warnings = lines.map((l) => JSON.parse(l) as { level: number; msg?: string; err?: { message?: string } })
+        .filter((l) => l.level === 40);
+      expect(warnings).toEqual([expect.objectContaining({ msg: 'registry unavailable', err: expect.objectContaining({ message: 'ECONNRESET' }) })]);
+    } finally {
+      await logged.close();
+    }
   });
 
   test('refresh: not an organization or unknown → 404, no NIP → 422 without a registry call', async () => {

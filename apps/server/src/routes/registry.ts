@@ -28,6 +28,7 @@ async function lookup(
     return entry;
   } catch (e) {
     if (!(e instanceof RegistryUnavailable)) throw e;
+    reply.log.warn({ err: e.cause ?? e }, 'registry unavailable');
     await reply.code(502).send(oneError('registry_unavailable', 'Реестр NIP временно недоступен, повторите позже'));
     return null;
   }

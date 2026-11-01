@@ -1,4 +1,4 @@
-import { isEmpty, type Value } from '@icrm/core';
+import { isEmpty, normalizeNip, type Value } from '@icrm/core';
 import { loadRecords } from '../repo/records.js';
 import { notFound, recordError, SaveFailed } from '../service/errors.js';
 import type { RecordService, SaveResult } from '../service/record-service.js';
@@ -26,7 +26,7 @@ const emptyAsNull = (v: Value | undefined): Value => (v === undefined || isEmpty
  * Fills an organization from a registry entry in one transaction (spec 2b §7.2): its title and address only
  * when empty, the registry's own fields (`regon`, `krs`, `vat_status`, `bank_accounts`) always, and
  * `registry_checked_at` with the time of the check. `not_found` for a record that is not a live organization,
- * `nip_invalid` for one without a NIP. The result is the view of the organization after commit.
+ * `nip_invalid` for one without a NIP, `version_conflict` when its NIP is no longer the entry's. The result is the view of the organization after commit.
  */
 export async function applyRegistryEntry(
   d: ApplyRegistryDeps, i: { id: string; entry: RegistryEntry; userId: string },
@@ -36,6 +36,10 @@ export async function applyRegistryEntry(
     const org = (await loadRecords(ops.tx, [i.id], { workspaceId: d.workspaceId, forUpdate: true })).get(i.id);
     if (org === undefined || org.archivedAt !== null || !org.sets.has('organization')) throw new SaveFailed([notFound(i.id)]);
     if (isEmpty(org.data.nip ?? null)) throw new SaveFailed([recordError('nip_invalid', 'У организации нет NIP', { field: 'nip' })]);
+    // The entry was looked up before the lock: a NIP changed since then makes it another taxpayer's.
+    if (normalizeNip(String(org.data.nip)) !== entry.nip) {
+      throw new SaveFailed([recordError('version_conflict', 'NIP организации изменился во время проверки, повторите', { field: 'nip' })]);
+    }
 
     const data: Record<string, Value> = {
       regon: emptyAsNull(entry.regon),
