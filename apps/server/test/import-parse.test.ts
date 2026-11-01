@@ -1,6 +1,9 @@
 import ExcelJS from 'exceljs';
 import { describe, expect, test } from 'vitest';
-import { MAX_IMPORT_ROWS, parseCsv, parseImportFile, parseVcard, parseXlsx, UnsupportedFormat } from '../src/import/parse.js';
+import {
+  ImportTooLarge, MAX_IMPORT_ROWS, MAX_XLSX_UNCOMPRESSED, parseCsv, parseImportFile, parseVcard, parseXlsx, UnsupportedFormat,
+} from '../src/import/parse.js';
+import { zipOf } from './zip.js';
 
 const utf8 = (s: string): Uint8Array => new TextEncoder().encode(s);
 
@@ -46,6 +49,28 @@ describe('parseVcard', () => {
     expect(rows[0]!.membership).toBeNull();
     expect(rows[1]!.contact.title).toBe('Beta; Co');
     expect(rows[1]!.contact.data).toEqual({});
+  });
+
+  test('vCard 2.1 from Android: quoted-printable with a charset and soft line breaks; base64 text is skipped', () => {
+    const vcf = ['BEGIN:VCARD', 'VERSION:2.1',
+      'N;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:=C5=81ukasiewicz;=C5=81ukasz;;;',
+      'FN;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:=C5=81ukasz =C5=81ukasiewicz',
+      'TEL;CELL:+48600100200',
+      'NOTE;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:Dzwoni=C4=87 po 10, =',
+      'nie w pi=C4=85tki=0D=0Awewn. 21',
+      'END:VCARD',
+      'BEGIN:VCARD', 'VERSION:2.1',
+      'N;CHARSET=windows-1250;QUOTED-PRINTABLE:=A3ukasiewicz;=A3ukasz;;;',
+      'FN;ENCODING=BASE64:xYF1a2Fzeg==',
+      'ORG;encoding=quoted-printable;charset=utf-8:Firma =C5=81=C3=B3d=C5=BA',
+      'END:VCARD'].join('\r\n');
+    const rows = parseVcard(vcf);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.contact).toEqual({ title: 'Łukasz Łukasiewicz', data: { notes: 'Dzwonić po 10, nie w piątki\nwewn. 21' } });
+    expect(rows[0]!.identities).toEqual([{ channel: 'phone', address: '+48600100200' }]);
+    // FN in base64 is skipped, so the name comes from N (windows-1250, the 2.1 bare QUOTED-PRINTABLE parameter)
+    expect(rows[1]!.contact.title).toBe('Łukasz Łukasiewicz');
+    expect(rows[1]!.organization).toEqual({ title: 'Firma Łódź', nip: null, data: {} });
   });
 
   test('a tab continues a folded line; without BEGIN:VCARD is unsupported', () => {
@@ -131,6 +156,38 @@ describe('row cap and sparse sheets', () => {
     const c = parseCsv(utf8(csv));
     expect(c.rows).toHaveLength(MAX_IMPORT_ROWS + 1);
     expect(c.rows.at(-1)!.line).toBe(MAX_IMPORT_ROWS + 2);
+  });
+});
+
+describe('XLSX uncompressed size guard', () => {
+  test('a ZIP whose entries inflate beyond the limit is too large, before it is opened', async () => {
+    const bomb = zipOf([
+      { name: '[Content_Types].xml', data: Buffer.from('<Types/>') },
+      { name: 'xl/worksheets/sheet1.xml', data: Buffer.alloc(MAX_XLSX_UNCOMPRESSED, 0x61) },
+    ]);
+    expect(bomb.length).toBeLessThan(1024 * 1024);
+    await expect(parseXlsx(bomb)).rejects.toBeInstanceOf(ImportTooLarge);
+    await expect(parseImportFile(bomb)).rejects.toBeInstanceOf(ImportTooLarge);
+  });
+
+  test('a claimed size of 0xFFFFFFFF (ZIP64) is too large; a broken central directory is unsupported', async () => {
+    const zip64 = zipOf([{ name: 'a.xml', data: Buffer.from('x'), claimedSize: 0xffffffff }]);
+    await expect(parseXlsx(zip64)).rejects.toBeInstanceOf(ImportTooLarge);
+    const ok = zipOf([{ name: 'a.xml', data: Buffer.from('x') }]);
+    // The directory offset points past the end of the file.
+    const badOffset = Buffer.from(ok);
+    badOffset.writeUInt32LE(0x7fffffff, badOffset.length - 6);
+    await expect(parseXlsx(badOffset)).rejects.toBeInstanceOf(UnsupportedFormat);
+    // A central entry without its signature.
+    const badEntry = Buffer.from(ok);
+    badEntry.writeUInt32LE(0, badEntry.readUInt32LE(badEntry.length - 6));
+    await expect(parseXlsx(badEntry)).rejects.toBeInstanceOf(UnsupportedFormat);
+    // No end-of-central-directory record at all.
+    await expect(parseXlsx(ok.subarray(0, ok.length - 22))).rejects.toBeInstanceOf(UnsupportedFormat);
+  });
+
+  test('a workbook within the limit still parses', async () => {
+    expect((await parseXlsx(await xlsxBytes())).headers).toEqual(['Imię', 'Data', 'Liczba', 'Suma', 'Opis']);
   });
 });
 

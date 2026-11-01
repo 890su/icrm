@@ -4,6 +4,16 @@ import ExcelJS from 'exceljs';
 /** The file is not a vCard, CSV or XLSX we can read (binary, corrupt, or without a header row). */
 export class UnsupportedFormat extends Error {}
 
+/** The file is within the upload limit but would take too much to read (an XLSX that inflates beyond the limit). */
+export class ImportTooLarge extends Error {}
+
+/** Largest accepted upload; the file is read into memory and never stored. */
+export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+/** The reply to an upload over `MAX_IMPORT_BYTES`. */
+export const FILE_TOO_LARGE_MESSAGE = `Файл больше ${MAX_IMPORT_BYTES / 1024 / 1024} МБ`;
+/** Largest total uncompressed size of the entries of an XLSX (its ZIP central directory), checked before it is opened. */
+export const MAX_XLSX_UNCOMPRESSED = 50 * 1024 * 1024;
+
 export type ParsedFile = { kind: 'vcard'; rows: ImportRow[] } | { kind: 'table'; table: ImportTable };
 
 const ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04];
@@ -51,35 +61,110 @@ const unescapeVcard = (s: string): string =>
 const splitStructured = (value: string): string[] =>
   value.split(/(?<!\\);/).map(unescapeVcard);
 
+/** A property with its value decoded (quoted-printable undone), still in vCard escaping. */
 interface Prop { name: string; value: string }
 
+/** The index of the first `:` outside double quotes, or -1. */
+function colonOf(line: string): number {
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (ch === ':' && !inQuotes) return i;
+  }
+  return -1;
+}
+
+/** Bare vCard 2.1 parameters (`TEL;CELL`, `NOTE;QUOTED-PRINTABLE`) that name an encoding. */
+const ENCODINGS: ReadonlySet<string> = new Set(['QUOTED-PRINTABLE', 'BASE64', 'B', '8BIT', '7BIT']);
+
+/** The parameters of a property head (`NAME;KEY=VALUE;BARE`), keys upper case; a bare encoding is `ENCODING`. */
+function paramsOf(head: string): Map<string, string> {
+  const params = new Map<string, string>();
+  for (const part of head.split(';').slice(1)) {
+    const eq = part.indexOf('=');
+    const key = (eq < 0 ? part : part.slice(0, eq)).trim().toUpperCase();
+    if (eq < 0) {
+      if (ENCODINGS.has(key)) params.set('ENCODING', key);
+      continue;
+    }
+    params.set(key, part.slice(eq + 1).trim().replace(/^"(.*)"$/, '$1'));
+  }
+  return params;
+}
+
+const isQuotedPrintable = (line: string): boolean => {
+  const colon = colonOf(line);
+  return colon >= 0 && paramsOf(line.slice(0, colon)).get('ENCODING')?.toUpperCase() === 'QUOTED-PRINTABLE';
+};
+
+/**
+ * Logical lines: a line starting with a space or tab continues the previous one (3.0/4.0 folding); a
+ * quoted-printable line ending with `=` (2.1 soft line break) takes the next physical line as is.
+ */
 function unfold(text: string): string[] {
   const out: string[] = [];
+  let softBreak = false;
   for (const line of text.split(/\r\n|\n|\r/)) {
-    if ((line.startsWith(' ') || line.startsWith('\t')) && out.length > 0) {
+    if (softBreak && !/^END:VCARD/i.test(line)) {
+      out[out.length - 1] = out[out.length - 1]!.slice(0, -1) + line;
+    } else if ((line.startsWith(' ') || line.startsWith('\t')) && out.length > 0) {
       out[out.length - 1] += line.slice(1);
     } else {
       out.push(line);
     }
+    const last = out[out.length - 1]!;
+    softBreak = last.endsWith('=') && isQuotedPrintable(last);
   }
   return out;
 }
 
-function parseProp(line: string): Prop | null {
-  let inQuotes = false;
-  let colon = -1;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') inQuotes = !inQuotes;
-    else if (ch === ':' && !inQuotes) {
-      colon = i;
-      break;
+/** A decoder for `charset` (UTF-8 when absent or unknown to the runtime). */
+function decoderFor(charset: string | undefined): { decode: (bytes: Uint8Array) => string } {
+  try {
+    return new TextDecoder(charset ?? 'utf-8');
+  } catch {
+    return new TextDecoder('utf-8');
+  }
+}
+
+/** Undoes quoted-printable: `=XX` bytes are decoded in `charset` (default UTF-8), CRLF becomes LF. */
+function decodeQuotedPrintable(value: string, charset: string | undefined): string {
+  const decoder = decoderFor(charset);
+  let out = '';
+  let bytes: number[] = [];
+  const flush = (): void => {
+    if (bytes.length > 0) out += decoder.decode(Uint8Array.from(bytes));
+    bytes = [];
+  };
+  for (let i = 0; i < value.length; i++) {
+    const hex = value[i] === '=' ? value.slice(i + 1, i + 3) : '';
+    if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+      bytes.push(Number.parseInt(hex, 16));
+      i += 2;
+    } else if (value[i] === '=' && i === value.length - 1) {
+      // a trailing soft line break
+    } else {
+      flush();
+      out += value[i];
     }
   }
+  flush();
+  return out.replace(/\r\n?/g, '\n');
+}
+
+/** A property of a logical line, or null for a line that is not one or a base64 value (a photo, not text). */
+function parseProp(line: string): Prop | null {
+  const colon = colonOf(line);
   if (colon < 0) return null;
-  const head = line.slice(0, colon).split(';')[0]!;
-  const name = head.slice(head.lastIndexOf('.') + 1).trim().toUpperCase();
-  return { name, value: line.slice(colon + 1) };
+  const head = line.slice(0, colon);
+  const group = head.split(';')[0]!;
+  const name = group.slice(group.lastIndexOf('.') + 1).trim().toUpperCase();
+  const params = paramsOf(head);
+  const encoding = params.get('ENCODING')?.toUpperCase();
+  const raw = line.slice(colon + 1);
+  if (encoding === 'BASE64' || encoding === 'B') return null;
+  return { name, value: encoding === 'QUOTED-PRINTABLE' ? decodeQuotedPrintable(raw, params.get('CHARSET')) : raw };
 }
 
 function cardRow(line: number, props: Prop[]): ImportRow {
@@ -252,7 +337,52 @@ function cellText(value: unknown): string {
   return '';
 }
 
+const EOCD_SIGNATURE = 0x06054b50;
+const CENTRAL_SIGNATURE = 0x02014b50;
+const EOCD_SIZE = 22;
+const CENTRAL_SIZE = 46;
+/** A 16/32-bit field at its maximum: the real value is in a ZIP64 record. */
+const ZIP64_16 = 0xffff;
+const ZIP64_32 = 0xffffffff;
+
+/**
+ * The sum of the uncompressed sizes of a ZIP's entries, from its central directory (no inflating):
+ * `ImportTooLarge` beyond `MAX_XLSX_UNCOMPRESSED` or for ZIP64 (sizes past 32 bits), `UnsupportedFormat`
+ * for a missing or broken directory. ExcelJS inflates every entry when it opens a workbook, so a small
+ * upload of repeated cells could otherwise take gigabytes.
+ */
+export function checkZipSize(bytes: Uint8Array): void {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let end = -1;
+  // The record is at the end, after a comment of at most 64 KiB.
+  for (let p = bytes.length - EOCD_SIZE; p >= 0 && p >= bytes.length - EOCD_SIZE - ZIP64_16; p--) {
+    if (view.getUint32(p, true) === EOCD_SIGNATURE) {
+      end = p;
+      break;
+    }
+  }
+  if (end < 0) throw new UnsupportedFormat('no ZIP end of central directory');
+  const entries = view.getUint16(end + 10, true);
+  const dirSize = view.getUint32(end + 12, true);
+  const dirOffset = view.getUint32(end + 16, true);
+  if (entries === ZIP64_16 || dirSize === ZIP64_32 || dirOffset === ZIP64_32) throw new ImportTooLarge('ZIP64 archive');
+  if (dirOffset + dirSize > end) throw new UnsupportedFormat('ZIP central directory out of bounds');
+  let total = 0;
+  let p = dirOffset;
+  for (let i = 0; i < entries; i++) {
+    if (p + CENTRAL_SIZE > end || view.getUint32(p, true) !== CENTRAL_SIGNATURE) {
+      throw new UnsupportedFormat('broken ZIP central directory');
+    }
+    const size = view.getUint32(p + 24, true);
+    if (size === ZIP64_32 || view.getUint32(p + 20, true) === ZIP64_32) throw new ImportTooLarge('ZIP64 entry');
+    total += size;
+    if (total > MAX_XLSX_UNCOMPRESSED) throw new ImportTooLarge(`XLSX inflates beyond ${MAX_XLSX_UNCOMPRESSED} bytes`);
+    p += CENTRAL_SIZE + view.getUint16(p + 28, true) + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+  }
+}
+
 export async function parseXlsx(bytes: Uint8Array): Promise<ImportTable> {
+  checkZipSize(bytes);
   const workbook = new ExcelJS.Workbook();
   try {
     await workbook.xlsx.load(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) as never);

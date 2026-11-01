@@ -2,6 +2,7 @@ import type { RecordError } from '@icrm/core';
 import { isRetryable, QueryError, type SaveResult } from '@icrm/db';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { ZodError } from 'zod';
+import { FILE_TOO_LARGE_MESSAGE } from './import/parse.js';
 
 interface ErrorBody {
   errors: { code: string; message: string }[];
@@ -33,6 +34,9 @@ export function sendSaved(reply: FastifyReply, res: SaveResult, okStatus: number
 const isDataException = (e: unknown): boolean =>
   typeof e === 'object' && e !== null && 'code' in e && typeof e.code === 'string' && e.code.startsWith('22');
 
+/** Too many files, fields or parts in a multipart request. */
+const MULTIPART_COUNT_LIMITS: ReadonlySet<string> = new Set(['FST_FILES_LIMIT', 'FST_FIELDS_LIMIT', 'FST_PARTS_LIMIT']);
+
 /** Maps whatever a route throws to the API's error bodies; unexpected errors never leak their message. */
 export function registerErrorHandling(app: FastifyInstance): void {
   app.setNotFoundHandler((_req, reply) => reply.code(404).send(notFoundBody('Маршрут не найден')));
@@ -52,9 +56,13 @@ export function registerErrorHandling(app: FastifyInstance): void {
       req.log.warn({ code: (err as { code: string }).code, message: (err as Error).message }, 'data exception mapped to 400');
       return reply.code(400).send(oneError('bad_request', 'Недопустимое значение в запросе или в данных'));
     }
-    // A file over the multipart limit (@fastify/multipart): only the import routes take files.
-    if ((err as { code?: unknown }).code === 'FST_REQ_FILE_TOO_LARGE') {
-      return reply.code(413).send(tooLargeBody('Файл больше 5 МБ'));
+    // Multipart limits (@fastify/multipart): only the import routes take files.
+    const code = (err as { code?: unknown }).code;
+    if (code === 'FST_REQ_FILE_TOO_LARGE') {
+      return reply.code(413).send(tooLargeBody(FILE_TOO_LARGE_MESSAGE));
+    }
+    if (typeof code === 'string' && MULTIPART_COUNT_LIMITS.has(code)) {
+      return reply.code(400).send(oneError('bad_request', 'Ожидается один файл (поле file) и поле mapping'));
     }
     // Fastify's own client errors (malformed JSON, unsupported content type, body too large).
     const status = (err as { statusCode?: unknown }).statusCode;

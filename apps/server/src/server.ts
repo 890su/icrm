@@ -5,10 +5,11 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import type { Kysely } from 'kysely';
 import { registerAuth } from './auth.js';
 import { registerErrorHandling } from './errors.js';
+import { MAX_IMPORT_BYTES } from './import/parse.js';
 import { MfWhiteList, type NipRegistry } from './registry/nip-registry.js';
 import { registerDuplicateRoutes } from './routes/duplicates.js';
 import { registerIdentityRoutes } from './routes/identities.js';
-import { MAX_IMPORT_BYTES, registerImportRoutes } from './routes/import.js';
+import { registerImportRoutes } from './routes/import.js';
 import { registerMembershipRoutes } from './routes/memberships.js';
 import { registerMergeRoutes } from './routes/merge.js';
 import { registerMetaRoutes } from './routes/meta.js';
@@ -47,7 +48,8 @@ export function buildServer(o: ServerOptions): FastifyInstance {
   acceptEmptyJsonBody(app);
   registerErrorHandling(app);
   registerAuth(app, o.apiToken);
-  app.register(multipart, { limits: { fileSize: MAX_IMPORT_BYTES, files: 1 } });
+  // One file and the mapping; a request with more files, fields or parts is a 400 (errors.ts).
+  app.register(multipart, { limits: { fileSize: MAX_IMPORT_BYTES, files: 1, fields: 4, parts: 6 } });
 
   const services = createServices({ db: o.db, cfg: o.cfg, workspaceId: o.workspaceId, now });
   registerMetaRoutes(app, o);

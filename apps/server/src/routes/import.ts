@@ -2,10 +2,7 @@ import type { ImportMapping, ImportRow, ImportService } from '@icrm/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { badRequestBody, tooLargeBody } from '../errors.js';
-import { MAX_IMPORT_ROWS, parseImportFile, UnsupportedFormat } from '../import/parse.js';
-
-/** Largest accepted upload; the file is read into memory and never stored. */
-export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+import { ImportTooLarge, MAX_IMPORT_ROWS, parseImportFile, UnsupportedFormat } from '../import/parse.js';
 
 const mappingSchema = z.record(z.string(), z.string());
 
@@ -13,11 +10,13 @@ interface Upload {
   file: Buffer | null;
   /** The raw `mapping` field, `null` when the request had none. */
   mapping: string | null;
+  /** The `mapping` field was cut at the multipart field size limit. */
+  mappingTruncated: boolean;
 }
 
 /** Reads the `file` and `mapping` parts, in whatever order they come; a file over the limit throws (see errors.ts). */
 async function readUpload(req: FastifyRequest): Promise<Upload> {
-  const upload: Upload = { file: null, mapping: null };
+  const upload: Upload = { file: null, mapping: null, mappingTruncated: false };
   for await (const part of req.parts()) {
     if (part.type === 'file') {
       // The stream must be drained either way; only the part called `file` is used.
@@ -25,6 +24,7 @@ async function readUpload(req: FastifyRequest): Promise<Upload> {
       if (part.fieldname === 'file' && upload.file === null) upload.file = bytes;
     } else if (part.fieldname === 'mapping' && typeof part.value === 'string') {
       upload.mapping = part.value;
+      upload.mappingTruncated = part.valueTruncated;
     }
   }
   return upload;
@@ -56,6 +56,10 @@ async function rowsOf(o: { imports: ImportService }, req: FastifyRequest, reply:
     await reply.code(400).send(badRequestBody('Не передан файл (поле file)'));
     return null;
   }
+  if (upload.mappingTruncated) {
+    await reply.code(400).send(badRequestBody('Поле mapping: сопоставление слишком большое'));
+    return null;
+  }
   let rows: ImportRow[];
   try {
     const parsed = await parseImportFile(upload.file);
@@ -83,6 +87,10 @@ async function rowsOf(o: { imports: ImportService }, req: FastifyRequest, reply:
       await reply.code(400).send(badRequestBody('Файл не похож на vCard, CSV или XLSX с заголовками'));
       return null;
     }
+    if (e instanceof ImportTooLarge) {
+      await reply.code(413).send(tooLargeBody('XLSX слишком большой после распаковки'));
+      return null;
+    }
     throw e;
   }
   if (rows.length > MAX_IMPORT_ROWS) {
@@ -101,6 +109,8 @@ export function registerImportRoutes(app: FastifyInstance, o: { imports: ImportS
 
   app.post('/import/commit', async (req, reply) => {
     const rows = await rowsOf(o, req, reply);
-    return rows === null ? reply : { rows: await o.imports.commit(rows, o.systemUserId) };
+    if (rows === null) return reply;
+    const onRowError = (err: unknown, line: number): void => req.log.warn({ err, line }, 'import row failed');
+    return { rows: await o.imports.commit(rows, o.systemUserId, { onRowError }) };
   });
 }

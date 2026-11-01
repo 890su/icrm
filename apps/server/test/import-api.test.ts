@@ -3,7 +3,9 @@ import { loadConfigDir } from '@icrm/core/node';
 import { freshDb } from '@icrm/db/testing';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { MAX_XLSX_UNCOMPRESSED } from '../src/import/parse.js';
 import { buildServer } from '../src/server.js';
+import { zipOf } from './zip.js';
 
 const TOKEN = 'test-token-0123456789';
 const fixture = (...p: string[]): string => fileURLToPath(new URL(['fixtures', ...p].join('/'), import.meta.url));
@@ -115,6 +117,31 @@ describe('POST /import/preview and /import/commit', () => {
     const r = await post('/import/preview', [file(ok), mapping({ N: 'contact.title' })]);
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json().rows).toHaveLength(5000);
+  });
+
+  test('an XLSX that inflates beyond the limit → 413 import_too_large', async () => {
+    const bomb = zipOf([{ name: 'xl/worksheets/sheet1.xml', data: Buffer.alloc(MAX_XLSX_UNCOMPRESSED + 1, 0x61) }]);
+    for (const url of ['/import/preview', '/import/commit']) {
+      const r = await post(url, [file(bomb, 'big.xlsx'), mapping(MAP)]);
+      expect(r.statusCode, r.body).toBe(413);
+      expect(r.json().errors).toEqual([expect.objectContaining({ code: 'import_too_large' })]);
+    }
+  });
+
+  test('a second file, too many fields or a mapping over the field limit → 400 bad_request', async () => {
+    const code = (r: LightMyRequestResponse): string => r.json().errors[0].code;
+    const twoFiles = await post('/import/preview', [file(CSV), file(CSV, 'other.csv'), mapping(MAP)]);
+    expect(twoFiles.statusCode, twoFiles.body).toBe(400);
+    expect(code(twoFiles)).toBe('bad_request');
+
+    const fields = Array.from({ length: 5 }, (_, i): Part => ({ name: `f${i}`, value: 'x' }));
+    const manyFields = await post('/import/preview', [file(CSV), mapping(MAP), ...fields]);
+    expect(manyFields.statusCode, manyFields.body).toBe(400);
+    expect(code(manyFields)).toBe('bad_request');
+
+    const huge = await post('/import/preview', [file(CSV), mapping(JSON.stringify({ ...MAP, pad: 'x'.repeat(1024 * 1024) }))]);
+    expect(huge.statusCode, huge.body).toBe(400);
+    expect(huge.json().errors).toEqual([{ code: 'bad_request', message: expect.stringContaining('сопоставление слишком большое') }]);
   });
 
   test('missing file, bad mapping JSON, unsupported format → 400; unknown target → 422', async () => {
