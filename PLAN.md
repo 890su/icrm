@@ -7,7 +7,7 @@ updated: 2026-11-01
 # Plan: iCRM
 
 ## In progress
-- [ ] 2b перед слиянием: развёртка свёрнутых строк vCard квадратична (`apps/server/src/import/parse.ts` `unfold`) — решать QP-признак один раз на логическую строку; сравнивать NIP из реестра через `normalizeNip`
+- нет активных задач
 
 ## Next
 - [ ] Подпроект 3 «Разговоры»: уточнение спецификации и план
@@ -30,7 +30,7 @@ updated: 2026-11-01
 - [ ] Дубли/NIP/импорт (2b), мелочи из ревью: set-based запрос пар дублей вместо поиска по каждой записи; гонка `reindex()` со свежим сохранением; цепочка `reindex` в `main.ts` логирует не ту ошибку; защита XLSX опирается на каталог ZIP (подделка счётчика записей и смещения — распаковка `inflateRawSync` с `maxOutputLength`); `exceljs` не поддерживается (устаревшие зависимости); UTF-16 CSV из Excel; `TEL;TYPE=FAX` импортируется как телефон, `TITLE` без `ORG` теряется; контакт с адресом в заголовке не получает имя из последующего импорта; пробный прогон не видит отказов сохранения (`public_domain`, `nip_taken`, правила); будущее участие не считается существующим; в реестре нет ограничений длины полей; поля реестра всплывают конфликтами при слиянии; тесты изоляции workspace для дублей
 
 ## Done
-- [x] Подпроект 2b «Контакты и организации: добавки» реализован (7 задач, ветка feat/contacts-extras; до слияния — исправить пункт «In progress») — 2026-11-01
+- [x] Подпроект 2b «Контакты и организации: добавки» реализован (7 задач, ветка feat/contacts-extras) — 2026-11-02
   - Result: подсказка дублей (`record_search`, `pg_trgm`, `/duplicates`, «не дубль», `possibleDuplicates`), заполнение по NIP из белого списка VAT (`/registry/nip/:nip`, `/records/:id/registry-refresh`), импорт vCard/CSV/XLSX (`/import/preview`, `/import/commit`); README «Дубли, NIP и импорт»; решения — `docs/superpowers/plans/2026-11-01-contacts-extras-rulings.md`
 - [x] Подпроект 2a «Контакты и организации: основа» реализован (9 задач, ветка feat/contacts-core) — 2026-11-01
   - Result: системные наборы `contact`/`organization`/`membership` в `@icrm/core` и секция `extend`; адреса каналов (`identities`) с владельцем контакт/участие/организация; сопоставление адреса (`GET /identities/lookup`); уход с передачей дел (`/memberships/:id/end`, `take`, `unassigned`); слияние дублей (`/records/:id/merge`); README, раздел «Контакты и организации»; решения — `docs/superpowers/plans/2026-10-31-contacts-core-rulings.md`
