@@ -83,3 +83,9 @@ test('an entry for another NIP than the organization has now → version_conflic
   // the same NIP written differently is the same NIP
   must(await svc.contacts.applyRegistryEntry({ id: org.id, entry: { ...ENTRY, nip: '7740001454' }, userId }));
 });
+
+test('an entry whose NIP is written with dashes matches the organization\'s normalised NIP', async () => {
+  const org = await create('Myślniki', ['organization'], { nip: '5213003700' });
+  const filled = must(await svc.contacts.applyRegistryEntry({ id: org.id, entry: { ...ENTRY, nip: '521-300-37-00' }, userId }));
+  expect(filled.data.registry_checked_at).toBe(CHECKED);
+});

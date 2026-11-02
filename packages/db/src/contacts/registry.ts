@@ -37,7 +37,8 @@ export async function applyRegistryEntry(
     if (org === undefined || org.archivedAt !== null || !org.sets.has('organization')) throw new SaveFailed([notFound(i.id)]);
     if (isEmpty(org.data.nip ?? null)) throw new SaveFailed([recordError('nip_invalid', 'У организации нет NIP', { field: 'nip' })]);
     // The entry was looked up before the lock: a NIP changed since then makes it another taxpayer's.
-    if (normalizeNip(String(org.data.nip)) !== entry.nip) {
+    // Both sides normalised: the registry's answer is passed on as the service wrote it.
+    if (normalizeNip(String(org.data.nip)) !== normalizeNip(entry.nip)) {
       throw new SaveFailed([recordError('version_conflict', 'NIP организации изменился во время проверки, повторите', { field: 'nip' })]);
     }
 

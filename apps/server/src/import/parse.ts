@@ -93,30 +93,73 @@ function paramsOf(head: string): Map<string, string> {
   return params;
 }
 
-const isQuotedPrintable = (line: string): boolean => {
-  const colon = colonOf(line);
-  return colon >= 0 && paramsOf(line.slice(0, colon)).get('ENCODING')?.toUpperCase() === 'QUOTED-PRINTABLE';
-};
+/**
+ * A logical line being assembled from physical ones. Each piece is scanned once: the head (up to the first
+ * `:` outside quotes) is looked for only until it is found, and whether the line is quoted-printable is
+ * decided then, so long runs of continuations stay linear.
+ */
+class LogicalLine {
+  /** The non-empty pieces; their concatenation is the line. */
+  private readonly parts: string[] = [];
+  private inQuotes = false;
+  private headDone = false;
+  private quotedPrintable = false;
+
+  constructor(first: string) {
+    this.add(first);
+  }
+
+  add(piece: string): void {
+    if (!this.headDone) {
+      for (let i = 0; i < piece.length; i++) {
+        const ch = piece[i];
+        if (ch === '"') {
+          this.inQuotes = !this.inQuotes;
+        } else if (ch === ':' && !this.inQuotes) {
+          this.headDone = true;
+          const head = this.parts.join('') + piece.slice(0, i);
+          this.quotedPrintable = paramsOf(head).get('ENCODING')?.toUpperCase() === 'QUOTED-PRINTABLE';
+          break;
+        }
+      }
+    }
+    if (piece !== '') this.parts.push(piece);
+  }
+
+  /** A quoted-printable line ending with `=` (2.1 soft line break). */
+  get softBreak(): boolean {
+    return this.quotedPrintable && (this.parts.at(-1)?.endsWith('=') ?? false);
+  }
+
+  /** Drops the `=` of a soft line break. */
+  dropSoftBreak(): void {
+    const last = this.parts.pop()!.slice(0, -1);
+    if (last !== '') this.parts.push(last);
+  }
+
+  toString(): string {
+    return this.parts.join('');
+  }
+}
 
 /**
  * Logical lines: a line starting with a space or tab continues the previous one (3.0/4.0 folding); a
  * quoted-printable line ending with `=` (2.1 soft line break) takes the next physical line as is.
  */
 function unfold(text: string): string[] {
-  const out: string[] = [];
-  let softBreak = false;
+  const out: LogicalLine[] = [];
   for (const line of text.split(/\r\n|\n|\r/)) {
-    if (softBreak && !/^END:VCARD/i.test(line)) {
-      out[out.length - 1] = out[out.length - 1]!.slice(0, -1) + line;
-    } else if ((line.startsWith(' ') || line.startsWith('\t')) && out.length > 0) {
-      out[out.length - 1] += line.slice(1);
+    const current = out.at(-1);
+    if (current?.softBreak && !/^END:VCARD/i.test(line)) {
+      current.dropSoftBreak();
+      current.add(line);
+    } else if ((line.startsWith(' ') || line.startsWith('\t')) && current !== undefined) {
+      current.add(line.slice(1));
     } else {
-      out.push(line);
+      out.push(new LogicalLine(line));
     }
-    const last = out[out.length - 1]!;
-    softBreak = last.endsWith('=') && isQuotedPrintable(last);
   }
-  return out;
+  return out.map(String);
 }
 
 /** A decoder for `charset` (UTF-8 when absent or unknown to the runtime). */

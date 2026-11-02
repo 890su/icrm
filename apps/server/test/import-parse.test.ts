@@ -73,6 +73,19 @@ describe('parseVcard', () => {
     expect(rows[1]!.organization).toEqual({ title: 'Firma Łódź', nip: null, data: {} });
   });
 
+  test('unfolding is linear: many continuations of a line without a closed head, or of soft breaks', () => {
+    const N = 100_000;
+    const unclosed = ['BEGIN:VCARD', 'FN:Anna', 'X;A="', ...Array<string>(N).fill(' ='), 'END:VCARD'].join('\r\n');
+    let started = Date.now();
+    expect(parseVcard(unclosed)[0]!.contact.title).toBe('Anna');
+    expect(Date.now() - started).toBeLessThan(2000);
+
+    const soft = ['BEGIN:VCARD', 'FN:Ola', 'NOTE;QUOTED-PRINTABLE:a=', ...Array<string>(N).fill('a='), 'b', 'END:VCARD'].join('\r\n');
+    started = Date.now();
+    expect(parseVcard(soft)[0]!.contact.data.notes).toBe(`${'a'.repeat(N + 1)}b`);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
   test('a tab continues a folded line; without BEGIN:VCARD is unsupported', () => {
     const rows = parseVcard('BEGIN:VCARD\r\nFN:Ab\r\n\tcd\r\nEND:VCARD');
     expect(rows[0]!.contact.title).toBe('Abcd');
